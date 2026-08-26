@@ -59,6 +59,7 @@ struct Session {
   window: Arc<Window>,
   canvas: Pixmap,
   backdrop: Pixmap,
+  frame: Pixmap,
   surface: Surface,
   bounds: Rect,
   selection: Option<Rect>,
@@ -226,10 +227,13 @@ impl Session {
     let surface = SoftSurface::new(&context, window.clone())
       .map_err(|error| anyhow!("no surface for the overlay: {error}"))?;
     let engine = TextEngine::load()?;
+    let frame = Pixmap::new(canvas.width(), canvas.height())
+      .expect("frame allocation failed");
     let mut session = Self {
       window,
       canvas,
       backdrop,
+      frame,
       surface,
       bounds,
       selection: None,
@@ -265,30 +269,38 @@ impl Session {
       matches!(self.mode, Mode::Idle),
     );
 
+    let canvas = &self.canvas;
+    let backdrop = &self.backdrop;
+    let shapes = self.history.shapes();
+    let draft = self.mode.draft();
+    let typing = Self::typing(&self.mode);
+    let text = &self.engine;
+
+    let frame = &mut self.frame;
     let scene = Scene {
-      frame: &self.canvas,
-      backdrop: &self.backdrop,
+      frame: canvas,
+      backdrop,
       bounds: self.bounds,
       selection: self.selection,
-      shapes: self.history.shapes(),
-      draft: self.mode.draft(),
-      typing: self.typing(),
+      shapes,
+      draft,
+      typing,
       palette_index: self.palette_index,
       chrome: &chrome,
       hotspot: self.hover,
-      text: &self.engine,
+      text,
     };
-    let mut frame = Pixmap::new(self.canvas.width(), self.canvas.height())
-      .expect("frame allocation failed");
-    render::paint(&mut frame, &scene);
-    self.present(&frame);
+
+    render::paint(frame, &scene);
+    self.present();
   }
 
-  fn present(&mut self, frame: &Pixmap) {
+  fn present(&mut self) {
     let Ok(mut buffer) = self.surface.buffer_mut() else {
       return;
     };
-    for (pixel, rgba) in buffer.iter_mut().zip(frame.data().as_chunks::<4>().0)
+    for (pixel, rgba) in
+      buffer.iter_mut().zip(self.frame.data().as_chunks::<4>().0)
     {
       let [r, g, b, _] = *rgba;
       *pixel =
@@ -297,8 +309,8 @@ impl Session {
     let _ = buffer.present();
   }
 
-  fn typing(&self) -> Option<(Point, &str)> {
-    if let Mode::Type(buffer, anchor) = &self.mode {
+  fn typing(mode: &Mode) -> Option<(Point, &str)> {
+    if let Mode::Type(buffer, anchor) = mode {
       Some((*anchor, buffer.as_str()))
     } else {
       None

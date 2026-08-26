@@ -32,15 +32,7 @@ pub fn polyline(
   width: f32,
   alpha: u8,
 ) {
-  if pts.len() < 2 {
-    return;
-  }
-  let mut path = PathBuilder::new();
-  path.move_to(pts[0].x, pts[0].y);
-  for p in &pts[1..] {
-    path.line_to(p.x, p.y);
-  }
-  let Some(path) = path.finish() else {
+  let Some(path) = smooth_path(pts) else {
     return;
   };
   pm.stroke_path(
@@ -50,6 +42,42 @@ pub fn polyline(
     Transform::identity(),
     None,
   );
+}
+
+// Samples per span. A fast stroke is captured with few, far-apart points;
+// subdividing each span keeps the stroked curve smooth instead of polygonal.
+const SMOOTH_STEPS: usize = 16;
+
+fn smooth_path(points: &[Point]) -> Option<Path> {
+  if points.len() < 2 {
+    return None;
+  }
+  let mut builder = PathBuilder::new();
+  builder.move_to(points[0].x, points[0].y);
+  for i in 0..points.len() - 1 {
+    let prev = points[i.saturating_sub(1)];
+    let curr = points[i];
+    let next = points[i + 1];
+    let after = points[(i + 2).min(points.len() - 1)];
+    for step in 1..=SMOOTH_STEPS {
+      let t = step as f32 / SMOOTH_STEPS as f32;
+      builder.line_to(
+        catmull_rom(prev.x, curr.x, next.x, after.x, t),
+        catmull_rom(prev.y, curr.y, next.y, after.y, t),
+      );
+    }
+  }
+  builder.finish()
+}
+
+fn catmull_rom(p0: f32, p1: f32, p2: f32, p3: f32, t: f32) -> f32 {
+  let t2 = t * t;
+  let t3 = t2 * t;
+  0.5
+    * ((2.0 * p1)
+      + (-p0 + p2) * t
+      + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2
+      + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3)
 }
 
 fn open_builder(points: &[Point]) -> Option<PathBuilder> {
