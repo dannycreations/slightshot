@@ -279,8 +279,14 @@ impl Session {
   }
 
   fn render(&mut self) {
-    let chrome =
-      render::build(self.selection, self.bounds, self.tool, &self.history);
+    let chrome = render::build(
+      self.selection,
+      self.bounds,
+      self.tool,
+      &self.history,
+      matches!(self.mode, Mode::Idle),
+    );
+
     let scene = Scene {
       frame: &self.canvas,
       backdrop: &self.backdrop,
@@ -327,7 +333,13 @@ impl Session {
     self.cursor = p;
     self.hover = self.selection.and_then(|sel| {
       render::hotspot_at(
-        &render::build(Some(sel), self.bounds, self.tool, &self.history),
+        &render::build(
+          Some(sel),
+          self.bounds,
+          self.tool,
+          &self.history,
+          matches!(self.mode, Mode::Idle),
+        ),
         p,
       )
     });
@@ -383,7 +395,13 @@ impl Session {
     let p = self.cursor;
     if let Some(sel) = self.selection {
       if let Some(hotspot) = render::hotspot_at(
-        &render::build(self.selection, self.bounds, self.tool, &self.history),
+        &render::build(
+          self.selection,
+          self.bounds,
+          self.tool,
+          &self.history,
+          matches!(self.mode, Mode::Idle),
+        ),
         p,
       ) {
         self.activate(hotspot);
@@ -498,8 +516,13 @@ impl Session {
   }
 
   fn button_command(&self, index: usize, tools: bool) -> render::Command {
-    let chrome =
-      render::build(self.selection, self.bounds, self.tool, &self.history);
+    let chrome = render::build(
+      self.selection,
+      self.bounds,
+      self.tool,
+      &self.history,
+      matches!(self.mode, Mode::Idle),
+    );
     let button = if tools {
       &chrome.tools[index]
     } else {

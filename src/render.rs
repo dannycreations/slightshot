@@ -73,6 +73,7 @@ pub fn build(
   bounds: Rect,
   tool: Tool,
   history: &History,
+  idle: bool,
 ) -> Chrome {
   let ready = deliverable_region(selection).is_some();
 
@@ -109,8 +110,13 @@ pub fn build(
   })
   .collect::<Vec<_>>();
 
-  layout_vertical(&mut tools, selection, bounds);
-  layout_horizontal(&mut actions, selection, bounds);
+  if idle {
+    layout_vertical(&mut tools, selection, bounds);
+    layout_horizontal(&mut actions, selection, bounds);
+  } else {
+    hide_all(&mut tools);
+    hide_all(&mut actions);
+  }
 
   Chrome { tools, actions }
 }
@@ -533,6 +539,7 @@ mod tests {
       Rect::new(0.0, 0.0, 1920.0, 1080.0),
       Tool::Pen,
       &History::default(),
+      true,
     );
     assert!(chrome.tools.iter().all(|b| b.area.w == 0.0));
     assert!(chrome.actions.iter().all(|b| b.area.w == 0.0));
@@ -546,6 +553,7 @@ mod tests {
       Rect::new(0.0, 0.0, 1920.0, 1080.0),
       Tool::Pen,
       &History::default(),
+      true,
     );
     assert!(chrome.tools.iter().all(|b| b.area.w > 0.0));
     assert!(chrome.actions.iter().all(|b| b.area.w > 0.0));
@@ -554,6 +562,20 @@ mod tests {
       .iter()
       .find(|b| b.command == Command::Deliver(Deliverable::Close));
     assert!(close.is_some_and(|b| b.enabled));
+  }
+
+  #[test]
+  fn build_hides_buttons_when_not_idle() {
+    let sel = Rect::new(10.0, 10.0, 200.0, 150.0);
+    let chrome = build(
+      Some(sel),
+      Rect::new(0.0, 0.0, 1920.0, 1080.0),
+      Tool::Pen,
+      &History::default(),
+      false,
+    );
+    assert!(chrome.tools.iter().all(|b| b.area.w == 0.0));
+    assert!(chrome.actions.iter().all(|b| b.area.w == 0.0));
   }
 
   #[test]
