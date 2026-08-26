@@ -73,7 +73,7 @@ pub fn build(
   bounds: Rect,
   tool: Tool,
   history: &History,
-  idle: bool,
+  show_chrome: bool,
 ) -> Chrome {
   let ready = deliverable_region(selection).is_some();
 
@@ -110,7 +110,7 @@ pub fn build(
   })
   .collect::<Vec<_>>();
 
-  if idle {
+  if show_chrome {
     layout_vertical(&mut tools, selection, bounds);
     layout_horizontal(&mut actions, selection, bounds);
   } else {

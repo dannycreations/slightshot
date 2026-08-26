@@ -44,6 +44,10 @@ impl Mode {
       _ => None,
     }
   }
+
+  fn shows_chrome(&self) -> bool {
+    matches!(self, Mode::Idle | Mode::Draw(_, _) | Mode::Type(_, _))
+  }
 }
 
 #[derive(Default)]
@@ -278,7 +282,7 @@ impl Session {
       self.bounds,
       self.tool,
       &self.history,
-      matches!(self.mode, Mode::Idle),
+      self.mode.shows_chrome(),
     );
 
     let canvas = &self.canvas;
@@ -339,7 +343,7 @@ impl Session {
           self.bounds,
           self.tool,
           &self.history,
-          matches!(self.mode, Mode::Idle),
+          self.mode.shows_chrome(),
         ),
         p,
       )
@@ -401,7 +405,7 @@ impl Session {
           self.bounds,
           self.tool,
           &self.history,
-          matches!(self.mode, Mode::Idle),
+          self.mode.shows_chrome(),
         ),
         p,
       ) {
@@ -522,7 +526,7 @@ impl Session {
       self.bounds,
       self.tool,
       &self.history,
-      matches!(self.mode, Mode::Idle),
+      self.mode.shows_chrome(),
     );
     let button = if tools {
       &chrome.tools[index]
