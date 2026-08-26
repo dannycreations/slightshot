@@ -1,6 +1,6 @@
 use std::{env, time::Duration};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use serde_json::Value;
 
 const ENDPOINT: &str = "https://api.imgur.com/3/image";
@@ -20,21 +20,21 @@ pub fn upload(png: &[u8]) -> Result<String> {
 }
 
 fn request(client_id: &str, png: &[u8]) -> Result<String> {
-  let outcome = ureq::post(ENDPOINT)
-    .timeout(Duration::from_secs(30))
-    .set("Authorization", &format!("Client-ID {client_id}"))
-    .set(
+  let mut response = ureq::post(ENDPOINT)
+    .config()
+    .timeout_global(Some(Duration::from_secs(30)))
+    .http_status_as_error(false)
+    .build()
+    .header("Authorization", &format!("Client-ID {client_id}"))
+    .header(
       "Content-Type",
       &format!("multipart/form-data; boundary={BOUNDARY}"),
     )
-    .send_bytes(&multipart(png));
-  let response = match outcome {
-    Ok(response) => response,
-    Err(ureq::Error::Status(_, response)) => response,
-    Err(error) => return Err(anyhow!(error)),
-  };
+    .send(&multipart(png))
+    .context("the Imgur upload request failed")?;
   response
-    .into_string()
+    .body_mut()
+    .read_to_string()
     .context("cannot read the Imgur reply body")
 }
 

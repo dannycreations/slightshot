@@ -159,7 +159,12 @@ mod tests {
     let info = reader.info();
     let (w, h) = (info.width, info.height);
     assert_eq!((w, h), (2, 1));
-    let mut buf = vec![0; reader.output_buffer_size()];
+    let mut buf = vec![
+      0;
+      reader
+        .output_buffer_size()
+        .expect("the decoded PNG fits in memory")
+    ];
     let _ = reader.next_frame(&mut buf).expect("decode frame");
     let expected = (w as usize) * (h as usize) * 4;
     assert_eq!(&buf[..expected], shot.rgba.as_slice());
