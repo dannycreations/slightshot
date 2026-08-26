@@ -162,20 +162,14 @@ pub fn rect_fill(pm: &mut Pixmap, rect: GeoRect, rgb: [u8; 3], alpha: u8) {
   );
 }
 
-pub fn dashed_rect(
-  pm: &mut Pixmap,
-  rect: GeoRect,
-  rgb: [u8; 3],
-  width: f32,
-  phase: f32,
-) {
+pub fn dashed_rect(pm: &mut Pixmap, rect: GeoRect, rgb: [u8; 3], width: f32) {
   let Some(path) = closed_path(&corners(rect)) else {
     return;
   };
   let mut stroke = stroke(width, None);
   stroke.line_cap = LineCap::Butt;
   stroke.line_join = LineJoin::Miter;
-  stroke.dash = StrokeDash::new(vec![3.0, 3.0], phase % 6.0);
+  stroke.dash = StrokeDash::new(vec![3.0, 3.0], 0.0);
   pm.stroke_path(
     &path,
     &paint(rgb[0], rgb[1], rgb[2], 255),

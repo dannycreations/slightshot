@@ -1,9 +1,4 @@
-use std::{
-  ffi::c_void,
-  num::NonZeroU32,
-  sync::Arc,
-  time::{Duration, Instant},
-};
+use std::{ffi::c_void, num::NonZeroU32, sync::Arc};
 
 use anyhow::{anyhow, Context, Result};
 use softbuffer::{Context as SoftContext, Surface as SoftSurface};
@@ -16,7 +11,7 @@ use winit::{
   application::ApplicationHandler,
   dpi::{PhysicalPosition, PhysicalSize},
   event::{ElementState, KeyEvent, MouseButton, WindowEvent},
-  event_loop::{ActiveEventLoop, ControlFlow},
+  event_loop::ActiveEventLoop,
   keyboard::{Key, NamedKey},
   platform::windows::WindowAttributesExtWindows,
   raw_window_handle::{HasWindowHandle, RawWindowHandle},
@@ -71,7 +66,6 @@ struct Session {
   tool: Tool,
   palette_index: usize,
   history: History,
-  ants_phase: f32,
   engine: TextEngine,
   cursor: Point,
   hover: Option<Hotspot>,
@@ -172,16 +166,6 @@ impl ApplicationHandler<Trigger> for App {
       Trigger::Quit => event_loop.exit(),
     }
   }
-
-  fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-    let Some(session) = self.session.as_mut() else {
-      return;
-    };
-    session.advance_ants();
-    event_loop.set_control_flow(ControlFlow::WaitUntil(
-      Instant::now() + Duration::from_millis(90),
-    ));
-  }
 }
 
 impl App {
@@ -253,7 +237,6 @@ impl Session {
       tool: Tool::Select,
       palette_index: 0,
       history: History::default(),
-      ants_phase: 0.0,
       engine,
       cursor: Point::default(),
       hover: None,
@@ -273,11 +256,6 @@ impl Session {
     Ok(session)
   }
 
-  fn advance_ants(&mut self) {
-    self.ants_phase = (self.ants_phase + 1.0) % 10.0;
-    self.window.request_redraw();
-  }
-
   fn render(&mut self) {
     let chrome = render::build(
       self.selection,
@@ -292,7 +270,6 @@ impl Session {
       backdrop: &self.backdrop,
       bounds: self.bounds,
       selection: self.selection,
-      ants_phase: self.ants_phase,
       shapes: self.history.shapes(),
       draft: self.mode.draft(),
       typing: self.typing(),

@@ -210,7 +210,6 @@ pub struct Scene<'a> {
   pub backdrop: &'a Pixmap,
   pub bounds: Rect,
   pub selection: Option<Rect>,
-  pub ants_phase: f32,
   pub shapes: &'a [Shape],
   pub draft: Option<&'a Shape>,
   pub typing: Option<(Point, &'a str)>,
@@ -224,7 +223,7 @@ pub fn paint(pm: &mut Pixmap, scene: &Scene) {
   pm.data_mut().copy_from_slice(scene.backdrop.data());
   draw_annotations(pm, scene);
   if let Some(sel) = scene.selection {
-    draw_border(pm, sel, scene.ants_phase);
+    draw_border(pm, sel);
     draw_handles(pm, sel);
     draw_badge(pm, sel, scene.bounds, scene.text);
     if let Some((at, buffer)) = scene.typing {
@@ -416,8 +415,8 @@ fn draw_shape(
   }
 }
 
-fn draw_border(pm: &mut Pixmap, sel: Rect, phase: f32) {
-  draw::dashed_rect(pm, sel, [255, 255, 255], 1.0, phase);
+fn draw_border(pm: &mut Pixmap, sel: Rect) {
+  draw::dashed_rect(pm, sel, [255, 255, 255], 1.0);
 }
 
 fn draw_handles(pm: &mut Pixmap, sel: Rect) {
