@@ -1,0 +1,17 @@
+# Core project settings
+edition = "2021"
+
+# Indentation and whitespace
+hard_tabs = false
+tab_spaces = 2
+indent_style = "Block"
+
+# Line width and formatting behavior
+max_width = 80
+trailing_comma = "Vertical"
+
+# Import and module organization
+group_imports = "StdExternalCrate"
+imports_granularity = "Crate"
+reorder_imports = true
+reorder_modules = true

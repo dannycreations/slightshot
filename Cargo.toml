@@ -1,0 +1,40 @@
+[package]
+name = "slightshot"
+version = "0.1.0"
+edition = "2021"
+authors = ["dannycreations"]
+license = "GPL"
+repository = "https://github.com/dannycreations/slightshot"
+
+[dependencies]
+anyhow = "1"
+arboard = "3"
+ctrlc = "3"
+fontdue = "0.9"
+png = "0.17"
+serde_json = "1"
+softbuffer = "0.4"
+tiny-skia = "0.11"
+ureq = "2"
+winit = "0.30"
+windows = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Gdi",
+  "Win32_UI_HiDpi",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
+[profile.dev]
+codegen-units = 16
+debug = 1
+incremental = true
+
+[profile.release]
+codegen-units = 1
+debug = "line-tables-only"
+incremental = false
+lto = true
+opt-level = "z"
+panic = "abort"
+split-debuginfo = "packed"
