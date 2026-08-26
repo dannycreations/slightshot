@@ -8,6 +8,7 @@ const FONT_FILES: [&str; 4] =
   ["segoeui.ttf", "arial.ttf", "tahoma.ttf", "calibri.ttf"];
 const ASCENT_RATIO: f32 = 0.8;
 
+#[derive(Default)]
 pub struct TextEngine {
   fonts: Vec<fontdue::Font>,
 }

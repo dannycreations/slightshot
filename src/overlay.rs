@@ -3,9 +3,13 @@ use std::{ffi::c_void, num::NonZeroU32, sync::Arc};
 use anyhow::{anyhow, Context, Result};
 use softbuffer::{Context as SoftContext, Surface as SoftSurface};
 use tiny_skia::Pixmap;
-use windows::Win32::{
-  Foundation::HWND,
-  UI::WindowsAndMessaging::{SetClassLongPtrW, GCLP_HBRBACKGROUND},
+use windows::{
+  core::BOOL,
+  Win32::{
+    Foundation::{HWND, TRUE},
+    Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_TRANSITIONS_FORCEDISABLED},
+    UI::WindowsAndMessaging::{SetClassLongPtrW, GCLP_HBRBACKGROUND},
+  },
 };
 use winit::{
   application::ApplicationHandler,
@@ -205,18 +209,25 @@ impl Session {
         .create_window(attributes)
         .context("creating the overlay window failed")?,
     );
-    // SAFETY: the handle comes from a winit window alive for the whole overlay
-    // lifetime, and we only clear the class background brush so Windows stops
-    // erasing the client area to white before our first frame composites, which
-    // is the white flash seen on capture. This is a documented Win32 call and
-    // it neither moves nor frees the window or its class.
+    // SAFETY: `hwnd` comes from a winit window alive for the whole overlay
+    // lifetime. `SetClassLongPtrW` only clears the class background brush so
+    // Windows stops erasing the client area to white before our first frame
+    // composites (the white flash seen on capture). `DwmSetWindowAttribute`
+    // with `DWMWA_TRANSITIONS_FORCEDISABLED` disables the DWM open/close fade so
+    // the dimmed overlay appears the instant the window is shown instead of
+    // fading in over ~200ms. Both are documented Win32 calls that neither move
+    // nor free the window or its class.
     if let Ok(handle) = window.window_handle() {
       if let RawWindowHandle::Win32(w) = handle.as_raw() {
+        let hwnd = HWND(w.hwnd.get() as *mut c_void);
         unsafe {
-          SetClassLongPtrW(
-            HWND(w.hwnd.get() as *mut c_void),
-            GCLP_HBRBACKGROUND,
-            0,
+          SetClassLongPtrW(hwnd, GCLP_HBRBACKGROUND, 0);
+          let disable: BOOL = TRUE;
+          let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_TRANSITIONS_FORCEDISABLED,
+            &disable as *const BOOL as *const c_void,
+            std::mem::size_of::<BOOL>() as u32,
           );
         }
       }
@@ -226,7 +237,6 @@ impl Session {
     })?;
     let surface = SoftSurface::new(&context, window.clone())
       .map_err(|error| anyhow!("no surface for the overlay: {error}"))?;
-    let engine = TextEngine::load()?;
     let frame = Pixmap::new(canvas.width(), canvas.height())
       .expect("frame allocation failed");
     let mut session = Self {
@@ -241,7 +251,7 @@ impl Session {
       tool: Tool::Select,
       palette_index: 0,
       history: History::default(),
-      engine,
+      engine: TextEngine::default(),
       cursor: Point::default(),
       hover: None,
       pending: None,
@@ -255,8 +265,10 @@ impl Session {
           .context("zero-height capture")?,
       )
       .map_err(|e| anyhow!("failed to resize the overlay surface: {e}"))?;
-    session.render();
     session.window.set_visible(true);
+    session.render();
+    session.engine = TextEngine::load()?;
+    session.window.request_redraw();
     Ok(session)
   }
 
