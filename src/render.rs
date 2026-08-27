@@ -17,7 +17,8 @@ const DIM_ALPHA: u8 = 105;
 const BUTTON: f32 = 30.0;
 const TOOL_GAP: f32 = 2.0;
 const PANEL_PAD: f32 = 5.0;
-const BADGE_TEXT: f32 = 13.0;
+const BADGE_TEXT: f32 = 18.0;
+const BADGE_GAP: f32 = 5.0;
 const ICON_BOX: f32 = 18.0;
 const HANDLE_MARGIN: f32 = 8.0;
 const BUTTON_MARGIN: f32 = 4.0;
@@ -312,9 +313,9 @@ fn badge_rect(sel: Rect, bounds: Rect, engine: &TextEngine) -> Rect {
   let box_w = text_width + pad * 2.0;
   let box_h = BADGE_TEXT + 7.0;
   let mut bx = sel.x;
-  let mut by = sel.y - box_h - 3.0;
+  let mut by = sel.y - box_h - BADGE_GAP;
   if by < bounds.y {
-    by = sel.y + 3.0;
+    by = sel.y + BADGE_GAP;
   }
   bx = bx.clamp(bounds.x, (bounds.right() - box_w).max(bounds.x));
   Rect::new(bx, by, box_w, box_h)
@@ -519,9 +520,9 @@ fn draw_badge(pm: &mut Pixmap, sel: Rect, bounds: Rect, engine: &TextEngine) {
   let box_h = BADGE_TEXT + 7.0;
 
   let mut bx = sel.x;
-  let mut by = sel.y - box_h - 3.0;
+  let mut by = sel.y - box_h - BADGE_GAP;
   if by < bounds.y {
-    by = sel.y + 3.0;
+    by = sel.y + BADGE_GAP;
   }
   bx = bx.clamp(bounds.x, (bounds.right() - box_w).max(bounds.x));
 
