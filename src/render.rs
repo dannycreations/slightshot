@@ -22,6 +22,9 @@ const BADGE_GAP: f32 = 5.0;
 const ICON_BOX: f32 = 18.0;
 const HANDLE_MARGIN: f32 = 8.0;
 const BUTTON_MARGIN: f32 = 4.0;
+const TOOLTIP_TEXT: f32 = 14.0;
+const TOOLTIP_PAD: f32 = 5.0;
+const TOOLTIP_GAP: f32 = 6.0;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Command {
@@ -29,6 +32,30 @@ pub enum Command {
   NextColor,
   Undo,
   Deliver(Deliverable),
+}
+
+impl Command {
+  pub fn label(self) -> &'static str {
+    match self {
+      Command::Tool(tool) => match tool {
+        Tool::Select => "Select",
+        Tool::Pen => "Pen",
+        Tool::Line => "Line",
+        Tool::Arrow => "Arrow",
+        Tool::Box => "Rectangle",
+        Tool::Marker => "Marker",
+        Tool::Label => "Text",
+      },
+      Command::NextColor => "Next color",
+      Command::Undo => "Undo",
+      Command::Deliver(deliverable) => match deliverable {
+        Deliverable::Upload => "Upload",
+        Deliverable::Copy => "Copy",
+        Deliverable::Save => "Save",
+        Deliverable::Close => "Close",
+      },
+    }
+  }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -293,6 +320,7 @@ pub fn dirty_rect(
   chrome: &Chrome,
   bounds: Rect,
   engine: &TextEngine,
+  hotspot: Option<Hotspot>,
 ) -> Option<Rect> {
   let sel = selection?;
   let mut dirty = sel.inflated(HANDLE_MARGIN);
@@ -302,6 +330,21 @@ pub fn dirty_rect(
   }
   for button in &chrome.actions {
     dirty = dirty.union(button.area.inflated(BUTTON_MARGIN));
+  }
+  if let Some(hotspot) = hotspot {
+    let button = match hotspot {
+      Hotspot::Tool(i) => chrome.tools.get(i),
+      Hotspot::Action(i) => chrome.actions.get(i),
+    };
+    if let Some(button) = button {
+      dirty = dirty.union(tooltip_rect(
+        button.area,
+        button.command.label(),
+        bounds,
+        engine,
+        tooltip_side(hotspot),
+      ));
+    }
   }
   Some(dirty)
 }
@@ -546,6 +589,30 @@ fn draw_panels(pm: &mut Pixmap, scene: &Scene) {
     let hovered = scene.hotspot == Some(Hotspot::Action(index));
     draw_button(pm, button, hovered, swatch);
   }
+  if let Some(Hotspot::Tool(i)) = scene.hotspot {
+    if let Some(button) = scene.chrome.tools.get(i) {
+      draw_tooltip(
+        pm,
+        button.area,
+        button.command.label(),
+        scene.bounds,
+        scene.text,
+        Side::Left,
+      );
+    }
+  }
+  if let Some(Hotspot::Action(i)) = scene.hotspot {
+    if let Some(button) = scene.chrome.actions.get(i) {
+      draw_tooltip(
+        pm,
+        button.area,
+        button.command.label(),
+        scene.bounds,
+        scene.text,
+        Side::Above,
+      );
+    }
+  }
 }
 
 fn draw_button(
@@ -582,6 +649,73 @@ fn draw_button(
   }
 }
 
+enum Side {
+  Left,
+  Above,
+}
+
+fn tooltip_side(hotspot: Hotspot) -> Side {
+  match hotspot {
+    Hotspot::Tool(_) => Side::Left,
+    Hotspot::Action(_) => Side::Above,
+  }
+}
+
+fn tooltip_rect(
+  area: Rect,
+  label: &str,
+  bounds: Rect,
+  engine: &TextEngine,
+  side: Side,
+) -> Rect {
+  let w = engine.width(label, TOOLTIP_TEXT) + TOOLTIP_PAD * 2.0;
+  let h = TOOLTIP_TEXT + TOOLTIP_PAD * 2.0;
+  let (mut bx, by) = match side {
+    Side::Left => {
+      let x = if area.x - TOOLTIP_GAP - w >= bounds.x {
+        area.x - TOOLTIP_GAP - w
+      } else {
+        area.right() + TOOLTIP_GAP
+      };
+      (x, area.center().y - h / 2.0)
+    }
+    Side::Above => {
+      let y = if area.y - TOOLTIP_GAP - h >= bounds.y {
+        area.y - TOOLTIP_GAP - h
+      } else {
+        area.bottom() + TOOLTIP_GAP
+      };
+      (area.center().x - w / 2.0, y)
+    }
+  };
+  bx = bx.clamp(bounds.x, (bounds.right() - w).max(bounds.x));
+  let by = by.clamp(bounds.y, (bounds.bottom() - h).max(bounds.y));
+  Rect::new(bx, by, w, h)
+}
+
+fn draw_tooltip(
+  pm: &mut Pixmap,
+  area: Rect,
+  label: &str,
+  bounds: Rect,
+  engine: &TextEngine,
+  side: Side,
+) {
+  if label.is_empty() {
+    return;
+  }
+  let rect = tooltip_rect(area, label, bounds, engine, side);
+  draw::rounded_fill(pm, rect, 4.0, [10, 10, 10], 220);
+  engine.draw(
+    pm,
+    label,
+    rect.x + TOOLTIP_PAD,
+    rect.y + TOOLTIP_PAD,
+    TOOLTIP_TEXT,
+    [240, 240, 240],
+  );
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -613,6 +747,28 @@ mod tests {
       Some(Hotspot::Action(0))
     );
     assert_eq!(hotspot_at(&chrome, Point::new(0.0, 0.0)), None);
+  }
+
+  #[test]
+  fn command_label_names_every_button() {
+    let cases = [
+      (Command::Tool(Tool::Select), "Select"),
+      (Command::Tool(Tool::Pen), "Pen"),
+      (Command::Tool(Tool::Line), "Line"),
+      (Command::Tool(Tool::Arrow), "Arrow"),
+      (Command::Tool(Tool::Box), "Rectangle"),
+      (Command::Tool(Tool::Marker), "Marker"),
+      (Command::Tool(Tool::Label), "Text"),
+      (Command::NextColor, "Next color"),
+      (Command::Undo, "Undo"),
+      (Command::Deliver(Deliverable::Upload), "Upload"),
+      (Command::Deliver(Deliverable::Copy), "Copy"),
+      (Command::Deliver(Deliverable::Save), "Save"),
+      (Command::Deliver(Deliverable::Close), "Close"),
+    ];
+    for (command, expected) in cases {
+      assert_eq!(command.label(), expected);
+    }
   }
 
   #[test]

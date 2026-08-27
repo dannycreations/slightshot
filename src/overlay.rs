@@ -324,7 +324,7 @@ impl Session {
       Rect::new(at.x, at.y, text.width(buffer, LABEL_SIZE), LABEL_SIZE)
     });
     let curr = match (
-      render::dirty_rect(self.selection, chrome, self.bounds, text),
+      render::dirty_rect(self.selection, chrome, self.bounds, text, self.hover),
       typing_rect,
     ) {
       (base, None) => base,
@@ -383,9 +383,13 @@ impl Session {
   fn mouse_move(&mut self, position: PhysicalPosition<f64>) {
     let p = Point::new(position.x as f32, position.y as f32);
     self.cursor = p;
+    let previous = self.hover;
     self.hover = self
       .selection
       .and_then(|_| render::hotspot_at(&self.chrome, p));
+    if self.hover != previous {
+      self.window.request_redraw();
+    }
     match &mut self.mode {
       Mode::Idle => {
         if self.tool == Tool::Select {
@@ -527,7 +531,13 @@ impl Session {
       Hotspot::Action(i) => self.button_command(i, false),
     };
     match command {
-      render::Command::Tool(tool) => self.tool = tool,
+      render::Command::Tool(tool) => {
+        self.tool = if self.tool == tool {
+          Tool::Select
+        } else {
+          tool
+        };
+      }
       render::Command::NextColor => {
         self.palette_index = (self.palette_index + 1) % PALETTE.len()
       }
