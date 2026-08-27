@@ -536,8 +536,17 @@ fn draw_shape(
       width,
     } => {
       let (start, end) = (rel(tail), rel(head));
-      draw::polyline(pm, &[start, end], *color, *width, 255);
-      draw::arrow_head(pm, start, end, (*width * 3.5).max(6.0), *color, 255);
+      let size = (*width * 3.5).max(6.0);
+      let (dx, dy) = (end.x - start.x, end.y - start.y);
+      let len = dx.hypot(dy);
+      let base = if len > 0.0 {
+        let k = size.min(len) / len;
+        Point::new(end.x - dx * k, end.y - dy * k)
+      } else {
+        end
+      };
+      draw::polyline(pm, &[start, base], *color, *width, 255);
+      draw::arrow_head(pm, start, end, size, *color, 255);
     }
     Shape::Outline { rect, color, width } => {
       let shifted = rect.translated(-origin.x, -origin.y);
@@ -885,5 +894,44 @@ mod tests {
       .iter()
       .any(|p| p[0] == 239 && p[1] == 68 && p[2] == 68);
     assert!(painted, "flattened region should contain the drawn stroke");
+  }
+
+  #[test]
+  fn arrow_line_stops_at_the_head_and_tapers_to_a_point() {
+    let Ok(engine) = TextEngine::load() else {
+      return;
+    };
+    let frame = Pixmap::new(100, 100).unwrap();
+    let sel = Rect::new(0.0, 0.0, 100.0, 100.0);
+    let arrow = Shape::Arrow {
+      tail: Point::new(10.0, 50.0),
+      head: Point::new(90.0, 50.0),
+      color: [255, 0, 0],
+      width: 4.0,
+    };
+    let shot = flatten(&frame, sel, &[arrow], &engine);
+    let width = shot.width as usize;
+
+    let painted_in_column = |x: usize| -> usize {
+      let mut count = 0;
+      for y in 0..shot.height as usize {
+        let p = &shot.rgba[(y * width + x) * 4..];
+        if p[0] == 255 && p[3] == 255 {
+          count += 1;
+        }
+      }
+      count
+    };
+
+    let tip = painted_in_column(90);
+    let body = painted_in_column(80);
+    assert!(
+      tip <= 2,
+      "arrow tip should taper to a point, got {tip} painted pixels at the head"
+    );
+    assert!(
+      body > 4,
+      "arrowhead body should be wider than the line, got {body} painted pixels"
+    );
   }
 }
