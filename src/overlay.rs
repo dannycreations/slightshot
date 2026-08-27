@@ -1,4 +1,4 @@
-use std::{ffi::c_void, num::NonZeroU32, sync::Arc};
+use std::{ffi::c_void, num::NonZeroU32, sync::Arc, thread};
 
 use anyhow::{anyhow, Context, Result};
 use softbuffer::{Context as SoftContext, Surface as SoftSurface};
@@ -16,7 +16,7 @@ use winit::{
   dpi::{PhysicalPosition, PhysicalSize},
   event::{ElementState, KeyEvent, MouseButton, WindowEvent},
   event_loop::ActiveEventLoop,
-  keyboard::{Key, NamedKey},
+  keyboard::{Key, ModifiersState, NamedKey},
   platform::windows::WindowAttributesExtWindows,
   raw_window_handle::{HasWindowHandle, RawWindowHandle},
   window::{CursorIcon, Window, WindowId, WindowLevel},
@@ -85,6 +85,7 @@ struct Session {
   dirty: Option<Rect>,
   scratch: Option<Pixmap>,
   pending: Option<Outcome>,
+  modifiers: ModifiersState,
 }
 
 #[derive(Default)]
@@ -106,6 +107,7 @@ impl ApplicationHandler<Trigger> for App {
     };
     match event {
       WindowEvent::CloseRequested => self.session = None,
+      WindowEvent::ModifiersChanged(state) => session.modifiers = state.state(),
       WindowEvent::RedrawRequested => session.render(),
       WindowEvent::CursorMoved { position, .. } => session.mouse_move(position),
       WindowEvent::MouseInput {
@@ -152,7 +154,17 @@ impl ApplicationHandler<Trigger> for App {
             ..
           },
         ..
-      } => session.type_char(ch.as_str()),
+      } => {
+        if ch.as_str().eq_ignore_ascii_case("c")
+          && session.modifiers.control_key()
+        {
+          if let Some(outcome) = session.deliver(Deliverable::Copy) {
+            self.finish(outcome);
+          }
+        } else {
+          session.type_char(ch.as_str());
+        }
+      }
       WindowEvent::KeyboardInput {
         event:
           KeyEvent {
@@ -185,11 +197,13 @@ impl ApplicationHandler<Trigger> for App {
 
 impl App {
   fn finish(&mut self, outcome: Outcome) {
-    match actions::execute(outcome.deliverable, &outcome.shot) {
-      Ok(summary) => println!("slightshot: {summary}"),
-      Err(error) => eprintln!("slightshot: {error:#}"),
-    }
     self.session = None;
+    thread::spawn(move || {
+      match actions::execute(outcome.deliverable, &outcome.shot) {
+        Ok(summary) => println!("slightshot: {summary}"),
+        Err(error) => eprintln!("slightshot: {error:#}"),
+      }
+    });
   }
 }
 
@@ -271,6 +285,7 @@ impl Session {
       dirty: None,
       scratch: None,
       pending: None,
+      modifiers: ModifiersState::default(),
     };
     session
       .surface
@@ -521,14 +536,8 @@ impl Session {
         self.window.request_redraw();
       }
       render::Command::Deliver(deliverable) => {
-        if let Some(sel) = render::deliverable_region(self.selection) {
-          let shot = render::flatten(
-            &self.canvas,
-            sel,
-            self.history.shapes(),
-            &self.engine,
-          );
-          self.pending = Some(Outcome { deliverable, shot });
+        if let Some(outcome) = self.deliver(deliverable) {
+          self.pending = Some(outcome);
         }
       }
     }
@@ -541,6 +550,14 @@ impl Session {
       &self.chrome.actions[index]
     };
     button.command
+  }
+
+  fn deliver(&self, deliverable: Deliverable) -> Option<Outcome> {
+    render::deliverable_region(self.selection).map(|sel| {
+      let shot =
+        render::flatten(&self.canvas, sel, self.history.shapes(), &self.engine);
+      Outcome { deliverable, shot }
+    })
   }
 
   fn mouse_up(&mut self) -> Option<Outcome> {
