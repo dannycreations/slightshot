@@ -2,9 +2,7 @@ use tiny_skia::Pixmap;
 
 use crate::{
   actions::{Deliverable, Shot},
-  annotate::{
-    active_color, History, Shape, Tool, LABEL_SIZE, MARKER_ALPHA, MARKER_WIDTH,
-  },
+  annotate::{active_color, History, Shape, Tool, MARKER_ALPHA},
   draw,
   geom::{handle_anchor, Point, Rect, HANDLES},
   text::TextEngine,
@@ -242,11 +240,12 @@ pub struct Scene<'a> {
   pub selection: Option<Rect>,
   pub shapes: &'a [Shape],
   pub draft: Option<&'a Shape>,
-  pub typing: Option<(Point, &'a str)>,
+  pub typing: Option<(Point, &'a str, f32)>,
   pub palette_index: usize,
   pub chrome: &'a Chrome,
   pub hotspot: Option<Hotspot>,
   pub text: &'a TextEngine,
+  pub hint: Option<&'a str>,
 }
 
 pub fn paint(
@@ -264,14 +263,11 @@ pub fn paint(
     draw_border(pm, sel);
     draw_handles(pm, sel);
     draw_badge(pm, sel, scene.bounds, scene.text);
-    if let Some((at, buffer)) = scene.typing {
-      let caret_x = at.x + scene.text.width(buffer, LABEL_SIZE);
+    if let Some((at, buffer, size)) = scene.typing {
+      let caret_x = at.x + scene.text.width(buffer, size);
       draw::polyline(
         pm,
-        &[
-          Point::new(caret_x, at.y),
-          Point::new(caret_x, at.y + LABEL_SIZE),
-        ],
+        &[Point::new(caret_x, at.y), Point::new(caret_x, at.y + size)],
         [255, 255, 255],
         1.5,
         255,
@@ -321,6 +317,7 @@ pub fn dirty_rect(
   bounds: Rect,
   engine: &TextEngine,
   hotspot: Option<Hotspot>,
+  hint: Option<&str>,
 ) -> Option<Rect> {
   let sel = selection?;
   let mut dirty = sel.inflated(HANDLE_MARGIN);
@@ -343,6 +340,17 @@ pub fn dirty_rect(
         bounds,
         engine,
         tooltip_side(hotspot),
+      ));
+    }
+  }
+  if let Some(hint_text) = hint {
+    if let Some(button) = chrome.tools.iter().find(|b| b.active) {
+      dirty = dirty.union(tooltip_rect(
+        button.area,
+        hint_text,
+        bounds,
+        engine,
+        Side::Left,
       ));
     }
   }
@@ -370,7 +378,7 @@ fn prepare_layer(
   sel: Rect,
   shapes: &[Shape],
   draft: Option<&Shape>,
-  typing: Option<(Point, &str, [u8; 3])>,
+  typing: Option<(Point, &str, [u8; 3], f32)>,
   engine: &TextEngine,
 ) -> Option<(Point, u32, u32)> {
   let px_w = source.width() as i32;
@@ -394,13 +402,13 @@ fn prepare_layer(
   if let Some(draft) = draft {
     draw_shape(&mut layer, draft, origin, engine);
   }
-  if let Some((at, buffer, ink)) = typing {
+  if let Some((at, buffer, ink, size)) = typing {
     engine.draw(
       &mut layer,
       buffer,
       at.x - origin.x,
       at.y - origin.y,
-      LABEL_SIZE,
+      size,
       ink,
     );
   }
@@ -417,7 +425,9 @@ fn draw_annotations(
     return;
   };
   let ink = active_color(scene.palette_index);
-  let typing = scene.typing.map(|(at, buffer)| (at, buffer, ink));
+  let typing = scene
+    .typing
+    .map(|(at, buffer, size)| (at, buffer, ink, size));
   let Some((origin, w, h)) = prepare_layer(
     scratch,
     scene.frame,
@@ -503,9 +513,13 @@ fn draw_shape(
       let mapped: Vec<Point> = points.iter().map(rel).collect();
       draw::polyline(pm, &mapped, *color, *width, 255);
     }
-    Shape::Marker { points, color } => {
+    Shape::Marker {
+      points,
+      color,
+      width,
+    } => {
       let mapped: Vec<Point> = points.iter().map(rel).collect();
-      draw::polyline(pm, &mapped, *color, MARKER_WIDTH, MARKER_ALPHA);
+      draw::polyline(pm, &mapped, *color, *width, MARKER_ALPHA);
     }
     Shape::Segment {
       from,
@@ -529,15 +543,13 @@ fn draw_shape(
       let shifted = rect.translated(-origin.x, -origin.y);
       draw::rect_stroke(pm, shifted, *color, *width, 255);
     }
-    Shape::Caption { at, text, color } => {
-      engine.draw(
-        pm,
-        text,
-        at.x - origin.x,
-        at.y - origin.y,
-        LABEL_SIZE,
-        *color,
-      );
+    Shape::Caption {
+      at,
+      text,
+      color,
+      size,
+    } => {
+      engine.draw(pm, text, at.x - origin.x, at.y - origin.y, *size, *color);
     }
   }
 }
@@ -611,6 +623,11 @@ fn draw_panels(pm: &mut Pixmap, scene: &Scene) {
         scene.text,
         Side::Above,
       );
+    }
+  }
+  if let Some(text) = scene.hint {
+    if let Some(button) = scene.chrome.tools.iter().find(|b| b.active) {
+      draw_tooltip(pm, button.area, text, scene.bounds, scene.text, Side::Left);
     }
   }
 }

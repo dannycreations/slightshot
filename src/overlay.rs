@@ -1,4 +1,11 @@
-use std::{ffi::c_void, num::NonZeroU32, sync::Arc, thread};
+use std::{
+  collections::HashMap,
+  ffi::c_void,
+  num::NonZeroU32,
+  sync::Arc,
+  thread,
+  time::{Duration, Instant},
+};
 
 use anyhow::{anyhow, Context, Result};
 use softbuffer::{Context as SoftContext, Surface as SoftSurface};
@@ -25,8 +32,7 @@ use winit::{
 use crate::{
   actions::{self, Deliverable, Shot},
   annotate::{
-    active_color, History, Shape, Tool, LABEL_SIZE, LINE_WIDTH, PALETTE,
-    PEN_WIDTH,
+    active_color, History, Shape, Tool, MAX_SIZE, MIN_SIZE, PALETTE, SIZE_STEP,
   },
   capture,
   geom::{hit_handle, resized, Handle, Point, Rect},
@@ -34,6 +40,8 @@ use crate::{
   render::{self, Chrome, Hotspot, Scene, HANDLE_SLOP},
   text::TextEngine,
 };
+
+const HINT_DURATION: Duration = Duration::from_millis(800);
 
 pub struct Outcome {
   pub deliverable: Deliverable,
@@ -86,6 +94,9 @@ struct Session {
   scratch: Option<Pixmap>,
   pending: Option<Outcome>,
   modifiers: ModifiersState,
+  sizes: HashMap<Tool, f32>,
+  hint: Option<String>,
+  hint_until: Option<Instant>,
 }
 
 #[derive(Default)]
@@ -161,6 +172,16 @@ impl ApplicationHandler<Trigger> for App {
           if let Some(outcome) = session.deliver(Deliverable::Copy) {
             self.finish(outcome);
           }
+        } else if (ch.as_str() == "[" || ch.as_str() == "]")
+          && session.tool.is_annotation()
+          && !session.is_typing()
+        {
+          let delta = if ch.as_str() == "]" {
+            SIZE_STEP
+          } else {
+            -SIZE_STEP
+          };
+          session.adjust_size(delta);
         } else {
           session.type_char(ch.as_str());
         }
@@ -286,6 +307,15 @@ impl Session {
       scratch: None,
       pending: None,
       modifiers: ModifiersState::default(),
+      sizes: {
+        let mut sizes = HashMap::new();
+        for tool in Tool::all() {
+          sizes.insert(*tool, tool.default_size());
+        }
+        sizes
+      },
+      hint: None,
+      hint_until: None,
     };
     session
       .surface
@@ -304,6 +334,12 @@ impl Session {
   }
 
   fn render(&mut self) {
+    if let Some(until) = self.hint_until {
+      if Instant::now() >= until {
+        self.hint = None;
+        self.hint_until = None;
+      }
+    }
     self.chrome = render::build(
       self.selection,
       self.bounds,
@@ -316,15 +352,22 @@ impl Session {
     let backdrop = &self.backdrop;
     let shapes = self.history.shapes();
     let draft = self.mode.draft();
-    let typing = Self::typing(&self.mode);
+    let typing = Self::typing(&self.mode, self.size(Tool::Label));
     let text = &self.engine;
 
     let prev = self.dirty;
-    let typing_rect = typing.map(|(at, buffer)| {
-      Rect::new(at.x, at.y, text.width(buffer, LABEL_SIZE), LABEL_SIZE)
+    let typing_rect = typing.map(|(at, buffer, size)| {
+      Rect::new(at.x, at.y, text.width(buffer, size), size)
     });
     let curr = match (
-      render::dirty_rect(self.selection, chrome, self.bounds, text, self.hover),
+      render::dirty_rect(
+        self.selection,
+        chrome,
+        self.bounds,
+        text,
+        self.hover,
+        self.hint.as_deref(),
+      ),
       typing_rect,
     ) {
       (base, None) => base,
@@ -345,6 +388,7 @@ impl Session {
       chrome,
       hotspot: self.hover,
       text,
+      hint: self.hint.as_deref(),
     };
 
     let restore = match (prev, curr) {
@@ -372,9 +416,9 @@ impl Session {
     let _ = buffer.present();
   }
 
-  fn typing(mode: &Mode) -> Option<(Point, &str)> {
+  fn typing(mode: &Mode, label_size: f32) -> Option<(Point, &str, f32)> {
     if let Mode::Type(buffer, anchor) = mode {
-      Some((*anchor, buffer.as_str()))
+      Some((*anchor, buffer.as_str(), label_size))
     } else {
       None
     }
@@ -471,7 +515,7 @@ impl Session {
           Shape::Freehand {
             points: vec![p],
             color: active_color(self.palette_index),
-            width: PEN_WIDTH,
+            width: self.size(Tool::Pen),
           },
           p,
         );
@@ -482,6 +526,7 @@ impl Session {
           Shape::Marker {
             points: vec![p],
             color: active_color(self.palette_index),
+            width: self.size(Tool::Marker),
           },
           p,
         );
@@ -493,7 +538,7 @@ impl Session {
             from: p,
             to: p,
             color: active_color(self.palette_index),
-            width: LINE_WIDTH,
+            width: self.size(Tool::Line),
           },
           p,
         );
@@ -505,7 +550,7 @@ impl Session {
             tail: p,
             head: p,
             color: active_color(self.palette_index),
-            width: LINE_WIDTH,
+            width: self.size(Tool::Arrow),
           },
           p,
         );
@@ -516,7 +561,7 @@ impl Session {
           Shape::Outline {
             rect: Rect::new(p.x, p.y, 0.0, 0.0),
             color: active_color(self.palette_index),
-            width: LINE_WIDTH,
+            width: self.size(Tool::Box),
           },
           p,
         );
@@ -609,6 +654,7 @@ impl Session {
         at: *anchor,
         text: std::mem::take(buffer),
         color: active_color(self.palette_index),
+        size: self.size(Tool::Label),
       };
       if text.is_complete() {
         self.history.push(text);
@@ -617,6 +663,56 @@ impl Session {
       self.window.request_redraw();
     }
     None
+  }
+
+  fn size(&self, tool: Tool) -> f32 {
+    self.sizes.get(&tool).copied().unwrap_or_default()
+  }
+
+  fn is_typing(&self) -> bool {
+    matches!(self.mode, Mode::Type(..))
+  }
+
+  fn adjust_size(&mut self, delta: f32) {
+    let tool = self.tool;
+    if !tool.is_annotation() {
+      return;
+    }
+    let next = (self.size(tool) + delta).clamp(MIN_SIZE, MAX_SIZE);
+    self.sizes.insert(tool, next);
+    if let Mode::Draw(
+      Shape::Marker { width, .. }
+      | Shape::Freehand { width, .. }
+      | Shape::Segment { width, .. }
+      | Shape::Arrow { width, .. }
+      | Shape::Outline { width, .. },
+      _,
+    ) = &mut self.mode
+    {
+      *width = next;
+    }
+    self.hint = Some(format_size(next));
+    self.hint_until = Some(Instant::now() + HINT_DURATION);
+    self.schedule_hint_clear();
+    self.window.request_redraw();
+  }
+
+  fn schedule_hint_clear(&self) {
+    let window = self.window.clone();
+    let _ = thread::Builder::new()
+      .name("slightshot-hint".to_string())
+      .spawn(move || {
+        thread::sleep(HINT_DURATION);
+        window.request_redraw();
+      });
+  }
+}
+
+fn format_size(size: f32) -> String {
+  if size.fract() == 0.0 {
+    format!("{}", size as i32)
+  } else {
+    format!("{size:.1}")
   }
 }
 

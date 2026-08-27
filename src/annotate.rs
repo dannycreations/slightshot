@@ -14,13 +14,16 @@ pub fn active_color(index: usize) -> [u8; 3] {
   PALETTE[index % PALETTE.len()]
 }
 
-pub const PEN_WIDTH: f32 = 2.5;
-pub const LINE_WIDTH: f32 = 2.0;
+pub const LINE_WIDTH: f32 = 4.0;
 pub const MARKER_WIDTH: f32 = 16.0;
 pub const MARKER_ALPHA: u8 = 80;
 pub const LABEL_SIZE: f32 = 20.0;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub const MIN_SIZE: f32 = 1.0;
+pub const MAX_SIZE: f32 = 100.0;
+pub const SIZE_STEP: f32 = 1.0;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Tool {
   Select,
   Pen,
@@ -29,6 +32,34 @@ pub enum Tool {
   Box,
   Marker,
   Label,
+}
+
+impl Tool {
+  pub fn default_size(self) -> f32 {
+    match self {
+      Tool::Select => 0.0,
+      Tool::Pen => LINE_WIDTH,
+      Tool::Line | Tool::Arrow | Tool::Box => LINE_WIDTH,
+      Tool::Marker => MARKER_WIDTH,
+      Tool::Label => LABEL_SIZE,
+    }
+  }
+
+  pub fn is_annotation(self) -> bool {
+    !matches!(self, Tool::Select)
+  }
+
+  pub fn all() -> &'static [Tool] {
+    &[
+      Tool::Select,
+      Tool::Pen,
+      Tool::Line,
+      Tool::Arrow,
+      Tool::Box,
+      Tool::Marker,
+      Tool::Label,
+    ]
+  }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -58,11 +89,13 @@ pub enum Shape {
   Marker {
     points: Vec<Point>,
     color: [u8; 3],
+    width: f32,
   },
   Caption {
     at: Point,
     text: String,
     color: [u8; 3],
+    size: f32,
   },
 }
 
@@ -145,6 +178,7 @@ mod tests {
       at: Point::new(x, y),
       text: "x".to_string(),
       color: PALETTE[0],
+      size: LABEL_SIZE,
     }
   }
 
@@ -166,7 +200,7 @@ mod tests {
     let stray = Shape::Freehand {
       points: vec![Point::new(0.0, 0.0)],
       color: PALETTE[1],
-      width: PEN_WIDTH,
+      width: LINE_WIDTH,
     };
     let stub = Shape::Segment {
       from: Point::new(0.0, 0.0),
@@ -211,6 +245,7 @@ mod tests {
       at: Point::new(2.0, 2.0),
       text: "hi".to_string(),
       color: PALETTE[0],
+      size: LABEL_SIZE,
     });
     history.translate_all(1.0, 1.0);
     assert_eq!(
@@ -228,6 +263,7 @@ mod tests {
         at: Point::new(3.0, 3.0),
         text: "hi".to_string(),
         color: PALETTE[0],
+        size: LABEL_SIZE,
       }
     );
   }
