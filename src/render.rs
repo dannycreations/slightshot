@@ -19,6 +19,8 @@ const TOOL_GAP: f32 = 2.0;
 const PANEL_PAD: f32 = 5.0;
 const BADGE_TEXT: f32 = 13.0;
 const ICON_BOX: f32 = 18.0;
+const HANDLE_MARGIN: f32 = 8.0;
+const BUTTON_MARGIN: f32 = 4.0;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Command {
@@ -219,9 +221,17 @@ pub struct Scene<'a> {
   pub text: &'a TextEngine,
 }
 
-pub fn paint(pm: &mut Pixmap, scene: &Scene) {
-  pm.data_mut().copy_from_slice(scene.backdrop.data());
-  draw_annotations(pm, scene);
+pub fn paint(
+  pm: &mut Pixmap,
+  scene: &Scene,
+  restore: Option<Rect>,
+  scratch: &mut Option<Pixmap>,
+) {
+  match restore {
+    None => pm.data_mut().copy_from_slice(scene.backdrop.data()),
+    Some(rect) => restore_region(pm, scene.backdrop, rect),
+  }
+  draw_annotations(pm, scene, scratch);
   if let Some(sel) = scene.selection {
     draw_border(pm, sel);
     draw_handles(pm, sel);
@@ -254,21 +264,84 @@ pub fn dimmed_copy(frame: &Pixmap) -> Pixmap {
   pm
 }
 
-fn annotated_layer(
+fn restore_region(target: &mut Pixmap, source: &Pixmap, rect: Rect) {
+  let px_w = target.width() as i32;
+  let px_h = target.height() as i32;
+  if px_w == 0 || px_h == 0 {
+    return;
+  }
+  let x0 = rect.x.floor().max(0.0) as i32;
+  let y0 = rect.y.floor().max(0.0) as i32;
+  let width = (rect.right().ceil() as i32 - x0).clamp(1, px_w - x0);
+  let height = (rect.bottom().ceil() as i32 - y0).clamp(1, px_h - y0);
+  if width <= 0 || height <= 0 {
+    return;
+  }
+  let stride = width as usize * 4;
+  let source_data = source.data();
+  let target_data = target.data_mut();
+  for row in 0..height as usize {
+    let offset = ((y0 as usize + row) * px_w as usize + x0 as usize) * 4;
+    target_data[offset..offset + stride]
+      .copy_from_slice(&source_data[offset..offset + stride]);
+  }
+}
+
+pub fn dirty_rect(
+  selection: Option<Rect>,
+  chrome: &Chrome,
+  bounds: Rect,
+  engine: &TextEngine,
+) -> Option<Rect> {
+  let sel = selection?;
+  let mut dirty = sel.inflated(HANDLE_MARGIN);
+  dirty = dirty.union(badge_rect(sel, bounds, engine));
+  for button in &chrome.tools {
+    dirty = dirty.union(button.area.inflated(BUTTON_MARGIN));
+  }
+  for button in &chrome.actions {
+    dirty = dirty.union(button.area.inflated(BUTTON_MARGIN));
+  }
+  Some(dirty)
+}
+
+fn badge_rect(sel: Rect, bounds: Rect, engine: &TextEngine) -> Rect {
+  let label = format!("{}x{}", sel.w.round() as i64, sel.h.round() as i64);
+  let text_width = engine.width(&label, BADGE_TEXT);
+  let pad = 6.0;
+  let box_w = text_width + pad * 2.0;
+  let box_h = BADGE_TEXT + 7.0;
+  let mut bx = sel.x;
+  let mut by = sel.y - box_h - 3.0;
+  if by < bounds.y {
+    by = sel.y + 3.0;
+  }
+  bx = bx.clamp(bounds.x, (bounds.right() - box_w).max(bounds.x));
+  Rect::new(bx, by, box_w, box_h)
+}
+
+fn prepare_layer(
+  scratch: &mut Option<Pixmap>,
   source: &Pixmap,
   sel: Rect,
   shapes: &[Shape],
   draft: Option<&Shape>,
   typing: Option<(Point, &str, [u8; 3])>,
   engine: &TextEngine,
-) -> Option<(Pixmap, Point)> {
+) -> Option<(Point, u32, u32)> {
   let px_w = source.width() as i32;
   let px_h = source.height() as i32;
   if px_w == 0 || px_h == 0 {
     return None;
   }
   let (x0, y0, width, height) = region_pixels(sel, px_w, px_h);
-  let mut layer = Pixmap::new(width as u32, height as u32)?;
+  if width <= 0 || height <= 0 {
+    return None;
+  }
+  let mut layer = match scratch.take() {
+    Some(p) if p.width() == width as u32 && p.height() == height as u32 => p,
+    _ => Pixmap::new(width as u32, height as u32)?,
+  };
   copy_region(&mut layer, source.data(), px_w as usize, x0, y0);
   let origin = Point::new(x0 as f32, y0 as f32);
   for shape in shapes {
@@ -287,16 +360,22 @@ fn annotated_layer(
       ink,
     );
   }
-  Some((layer, origin))
+  *scratch = Some(layer);
+  Some((origin, width as u32, height as u32))
 }
 
-fn draw_annotations(pm: &mut Pixmap, scene: &Scene) {
+fn draw_annotations(
+  pm: &mut Pixmap,
+  scene: &Scene,
+  scratch: &mut Option<Pixmap>,
+) {
   let Some(sel) = scene.selection else {
     return;
   };
   let ink = active_color(scene.palette_index);
   let typing = scene.typing.map(|(at, buffer)| (at, buffer, ink));
-  let Some((layer, origin)) = annotated_layer(
+  let Some((origin, w, h)) = prepare_layer(
+    scratch,
     scene.frame,
     sel,
     scene.shapes,
@@ -306,11 +385,12 @@ fn draw_annotations(pm: &mut Pixmap, scene: &Scene) {
   ) else {
     return;
   };
-  let stride = layer.width() as usize * 4;
+  let layer = scratch.as_ref().unwrap();
+  let stride = w as usize * 4;
   let canvas_w = pm.width() as usize;
   let source = layer.data();
   let target = pm.data_mut();
-  for row in 0..layer.height() as usize {
+  for row in 0..h as usize {
     let from = row * stride;
     let to = ((origin.y as usize + row) * canvas_w + origin.x as usize) * 4;
     target[to..to + stride].copy_from_slice(&source[from..from + stride]);
@@ -349,13 +429,16 @@ pub fn flatten(
   shapes: &[Shape],
   text: &TextEngine,
 ) -> Shot {
-  let Some((layer, _)) = annotated_layer(frame, sel, shapes, None, None, text)
+  let mut scratch = None;
+  let Some((_, w, h)) =
+    prepare_layer(&mut scratch, frame, sel, shapes, None, None, text)
   else {
     return Shot::empty();
   };
+  let layer = scratch.as_ref().unwrap();
   Shot {
-    width: layer.width(),
-    height: layer.height(),
+    width: w,
+    height: h,
     rgba: layer.data().to_vec(),
   }
 }

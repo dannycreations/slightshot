@@ -87,6 +87,20 @@ impl Rect {
       && self.y <= p.y
       && p.y <= self.bottom()
   }
+
+  pub fn union(self, other: Rect) -> Rect {
+    if self.w <= 0.0 || self.h <= 0.0 {
+      return other;
+    }
+    if other.w <= 0.0 || other.h <= 0.0 {
+      return self;
+    }
+    let x = self.x.min(other.x);
+    let y = self.y.min(other.y);
+    let right = self.right().max(other.right());
+    let bottom = self.bottom().max(other.bottom());
+    Rect::new(x, y, right - x, bottom - y)
+  }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

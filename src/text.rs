@@ -1,16 +1,22 @@
-use std::{env, fs, path::Path};
+use std::{cell::RefCell, collections::HashMap, env, fs, path::Path, rc::Rc};
 
 use anyhow::{anyhow, bail, Result};
-use fontdue::{Font, FontSettings};
+use fontdue::{Font, FontSettings, Metrics};
 use tiny_skia::Pixmap;
 
 const FONT_FILES: [&str; 4] =
   ["segoeui.ttf", "arial.ttf", "tahoma.ttf", "calibri.ttf"];
 const ASCENT_RATIO: f32 = 0.8;
 
+struct Glyph {
+  metrics: Metrics,
+  coverage: Vec<u8>,
+}
+
 #[derive(Default)]
 pub struct TextEngine {
   fonts: Vec<fontdue::Font>,
+  cache: RefCell<HashMap<(char, u32), Rc<Glyph>>>,
 }
 
 impl TextEngine {
@@ -31,7 +37,10 @@ impl TextEngine {
       let font = Font::from_bytes(bytes, settings).map_err(|reason| {
         anyhow!("{} is not a usable font: {reason}", path.display())
       })?;
-      return Ok(Self { fonts: vec![font] });
+      return Ok(Self {
+        fonts: vec![font],
+        cache: RefCell::new(HashMap::new()),
+      });
     }
     bail!("no system font found under {}", fonts.display())
   }
@@ -49,7 +58,8 @@ impl TextEngine {
     let mut pen = x;
     let (pw, ph) = (pm.width() as i32, pm.height() as i32);
     for ch in text.chars() {
-      let (m, cov) = self.fonts[0].rasterize(ch, size);
+      let glyph = self.raster(ch, size);
+      let m = &glyph.metrics;
       if m.width > 0 && m.height > 0 {
         let left = pen + m.xmin as f32;
         let top = baseline - (m.ymin + m.height as i32) as f32;
@@ -59,7 +69,7 @@ impl TextEngine {
           ph,
           left.round() as i32,
           top.round() as i32,
-          &cov,
+          &glyph.coverage,
           m.width,
           m.height,
           rgb,
@@ -69,11 +79,22 @@ impl TextEngine {
     }
   }
 
+  fn raster(&self, ch: char, size: f32) -> Rc<Glyph> {
+    let key = (ch, size.to_bits());
+    let mut cache = self.cache.borrow_mut();
+    if let Some(glyph) = cache.get(&key) {
+      return Rc::clone(glyph);
+    }
+    let (metrics, coverage) = self.fonts[0].rasterize(ch, size);
+    let glyph = Rc::new(Glyph { metrics, coverage });
+    cache.insert(key, Rc::clone(&glyph));
+    glyph
+  }
+
   pub fn width(&self, text: &str, size: f32) -> f32 {
     let mut total = 0.0;
     for ch in text.chars() {
-      let (m, _) = self.fonts[0].rasterize(ch, size);
-      total += m.advance_width;
+      total += self.raster(ch, size).metrics.advance_width;
     }
     total
   }
@@ -117,7 +138,10 @@ mod tests {
 
   #[test]
   fn empty_string_has_zero_width_without_loading_a_font() {
-    let engine = TextEngine { fonts: Vec::new() };
+    let engine = TextEngine {
+      fonts: Vec::new(),
+      cache: RefCell::new(HashMap::new()),
+    };
     assert_eq!(engine.width("", 20.0), 0.0);
   }
 

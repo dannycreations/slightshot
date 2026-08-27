@@ -25,7 +25,8 @@ use winit::{
 use crate::{
   actions::{self, Deliverable, Shot},
   annotate::{
-    active_color, History, Shape, Tool, LINE_WIDTH, PALETTE, PEN_WIDTH,
+    active_color, History, Shape, Tool, LABEL_SIZE, LINE_WIDTH, PALETTE,
+    PEN_WIDTH,
   },
   capture,
   geom::{hit_handle, resized, Handle, Point, Rect},
@@ -81,6 +82,8 @@ struct Session {
   cursor: Point,
   hover: Option<Hotspot>,
   chrome: Chrome,
+  dirty: Option<Rect>,
+  scratch: Option<Pixmap>,
   pending: Option<Outcome>,
 }
 
@@ -265,6 +268,8 @@ impl Session {
         tools: Vec::new(),
         actions: Vec::new(),
       },
+      dirty: None,
+      scratch: None,
       pending: None,
     };
     session
@@ -291,15 +296,26 @@ impl Session {
       &self.history,
       self.mode.shows_chrome(),
     );
-
     let chrome = &self.chrome;
-
     let canvas = &self.canvas;
     let backdrop = &self.backdrop;
     let shapes = self.history.shapes();
     let draft = self.mode.draft();
     let typing = Self::typing(&self.mode);
     let text = &self.engine;
+
+    let prev = self.dirty;
+    let typing_rect = typing.map(|(at, buffer)| {
+      Rect::new(at.x, at.y, text.width(buffer, LABEL_SIZE), LABEL_SIZE)
+    });
+    let curr = match (
+      render::dirty_rect(self.selection, chrome, self.bounds, text),
+      typing_rect,
+    ) {
+      (base, None) => base,
+      (None, Some(c)) => Some(c),
+      (Some(b), Some(c)) => Some(b.union(c)),
+    };
 
     let frame = &mut self.frame;
     let scene = Scene {
@@ -316,7 +332,14 @@ impl Session {
       text,
     };
 
-    render::paint(frame, &scene);
+    let restore = match (prev, curr) {
+      (None, _) => None,
+      (Some(p), Some(c)) => Some(p.union(c)),
+      (Some(p), None) => Some(p),
+    };
+
+    render::paint(frame, &scene, restore, &mut self.scratch);
+    self.dirty = Some(curr.unwrap_or_default());
     self.present();
   }
 
