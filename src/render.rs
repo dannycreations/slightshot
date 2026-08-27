@@ -3,7 +3,7 @@ use tiny_skia::Pixmap;
 use crate::{
   actions::{Deliverable, Shot},
   annotate::{
-    History, Shape, Tool, LABEL_SIZE, MARKER_ALPHA, MARKER_WIDTH, PALETTE,
+    active_color, History, Shape, Tool, LABEL_SIZE, MARKER_ALPHA, MARKER_WIDTH,
   },
   draw,
   geom::{handle_anchor, Point, Rect, HANDLES},
@@ -294,7 +294,7 @@ fn draw_annotations(pm: &mut Pixmap, scene: &Scene) {
   let Some(sel) = scene.selection else {
     return;
   };
-  let ink = PALETTE[scene.palette_index % PALETTE.len()];
+  let ink = active_color(scene.palette_index);
   let typing = scene.typing.map(|(at, buffer)| (at, buffer, ink));
   let Some((layer, origin)) = annotated_layer(
     scene.frame,
@@ -453,7 +453,7 @@ fn draw_badge(pm: &mut Pixmap, sel: Rect, bounds: Rect, engine: &TextEngine) {
 }
 
 fn draw_panels(pm: &mut Pixmap, scene: &Scene) {
-  let swatch = PALETTE[scene.palette_index % PALETTE.len()];
+  let swatch = active_color(scene.palette_index);
   for (index, button) in scene.chrome.tools.iter().enumerate() {
     let hovered = scene.hotspot == Some(Hotspot::Tool(index));
     draw_button(pm, button, hovered, swatch);

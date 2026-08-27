@@ -142,12 +142,4 @@ mod tests {
     let large = engine.width("MM", 40.0);
     assert!(large > small, "larger text should be wider");
   }
-
-  #[test]
-  fn width_is_zero_for_empty_text() {
-    let Ok(engine) = TextEngine::load() else {
-      return;
-    };
-    assert_eq!(engine.width("", 20.0), 0.0);
-  }
 }

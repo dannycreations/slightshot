@@ -326,23 +326,29 @@ impl Icon {
   }
 }
 
+const ICONS: [Icon; 11] = [
+  Icon::Pen,
+  Icon::Marker,
+  Icon::Arrow,
+  Icon::Outline,
+  Icon::Line,
+  Icon::Letter,
+  Icon::Undo,
+  Icon::Upload,
+  Icon::CopyImage,
+  Icon::Save,
+  Icon::Close,
+];
+
 fn sprite(icon: Icon) -> &'static Pixmap {
-  static CACHE: OnceLock<[Pixmap; 11]> = OnceLock::new();
-  &CACHE.get_or_init(|| {
-    [
-      load_sprite(sprite_bytes(Icon::Pen)),
-      load_sprite(sprite_bytes(Icon::Marker)),
-      load_sprite(sprite_bytes(Icon::Arrow)),
-      load_sprite(sprite_bytes(Icon::Outline)),
-      load_sprite(sprite_bytes(Icon::Line)),
-      load_sprite(sprite_bytes(Icon::Letter)),
-      load_sprite(sprite_bytes(Icon::Undo)),
-      load_sprite(sprite_bytes(Icon::Upload)),
-      load_sprite(sprite_bytes(Icon::CopyImage)),
-      load_sprite(sprite_bytes(Icon::Save)),
-      load_sprite(sprite_bytes(Icon::Close)),
-    ]
-  })[icon as usize]
+  static CACHE: OnceLock<Vec<Pixmap>> = OnceLock::new();
+  let cache = CACHE.get_or_init(|| {
+    ICONS
+      .iter()
+      .map(|&variant| load_sprite(sprite_bytes(variant)))
+      .collect()
+  });
+  &cache[icon as usize]
 }
 
 fn sprite_bytes(icon: Icon) -> &'static [u8] {
@@ -434,25 +440,12 @@ mod tests {
         }
       }
     }
-    eprintln!("large_coord lit={lit}");
     assert!(lit > 20, "icon missing at large coords: lit={lit}");
   }
 
   #[test]
   fn every_icon_paints_something() {
-    for icon in [
-      Icon::Pen,
-      Icon::Marker,
-      Icon::Arrow,
-      Icon::Outline,
-      Icon::Line,
-      Icon::Letter,
-      Icon::Undo,
-      Icon::Upload,
-      Icon::CopyImage,
-      Icon::Save,
-      Icon::Close,
-    ] {
+    for icon in ICONS {
       let mut pm = Pixmap::new(24, 24).expect("alloc");
       icon.paint(&mut pm, Point::new(12.0, 12.0), 18.0, [240, 240, 240]);
       assert!(

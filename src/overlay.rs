@@ -24,11 +24,13 @@ use winit::{
 
 use crate::{
   actions::{self, Deliverable, Shot},
-  annotate::{History, Shape, Tool, LINE_WIDTH, PALETTE, PEN_WIDTH},
+  annotate::{
+    active_color, History, Shape, Tool, LINE_WIDTH, PALETTE, PEN_WIDTH,
+  },
   capture,
   geom::{hit_handle, resized, Handle, Point, Rect},
   hotkey::Trigger,
-  render::{self, Hotspot, Scene, HANDLE_SLOP},
+  render::{self, Chrome, Hotspot, Scene, HANDLE_SLOP},
   text::TextEngine,
 };
 
@@ -78,6 +80,7 @@ struct Session {
   engine: TextEngine,
   cursor: Point,
   hover: Option<Hotspot>,
+  chrome: Chrome,
   pending: Option<Outcome>,
 }
 
@@ -258,6 +261,10 @@ impl Session {
       engine: TextEngine::default(),
       cursor: Point::default(),
       hover: None,
+      chrome: Chrome {
+        tools: Vec::new(),
+        actions: Vec::new(),
+      },
       pending: None,
     };
     session
@@ -277,13 +284,15 @@ impl Session {
   }
 
   fn render(&mut self) {
-    let chrome = render::build(
+    self.chrome = render::build(
       self.selection,
       self.bounds,
       self.tool,
       &self.history,
       self.mode.shows_chrome(),
     );
+
+    let chrome = &self.chrome;
 
     let canvas = &self.canvas;
     let backdrop = &self.backdrop;
@@ -302,7 +311,7 @@ impl Session {
       draft,
       typing,
       palette_index: self.palette_index,
-      chrome: &chrome,
+      chrome,
       hotspot: self.hover,
       text,
     };
@@ -336,18 +345,9 @@ impl Session {
   fn mouse_move(&mut self, position: PhysicalPosition<f64>) {
     let p = Point::new(position.x as f32, position.y as f32);
     self.cursor = p;
-    self.hover = self.selection.and_then(|sel| {
-      render::hotspot_at(
-        &render::build(
-          Some(sel),
-          self.bounds,
-          self.tool,
-          &self.history,
-          self.mode.shows_chrome(),
-        ),
-        p,
-      )
-    });
+    self.hover = self
+      .selection
+      .and_then(|_| render::hotspot_at(&self.chrome, p));
     match &mut self.mode {
       Mode::Idle => {
         if self.tool == Tool::Select {
@@ -399,16 +399,7 @@ impl Session {
   fn mouse_down(&mut self) {
     let p = self.cursor;
     if let Some(sel) = self.selection {
-      if let Some(hotspot) = render::hotspot_at(
-        &render::build(
-          self.selection,
-          self.bounds,
-          self.tool,
-          &self.history,
-          self.mode.shows_chrome(),
-        ),
-        p,
-      ) {
+      if let Some(hotspot) = render::hotspot_at(&self.chrome, p) {
         self.activate(hotspot);
         return;
       }
@@ -437,7 +428,7 @@ impl Session {
         self.mode = Mode::Draw(
           Shape::Freehand {
             points: vec![p],
-            color: PALETTE[self.palette_index % PALETTE.len()],
+            color: active_color(self.palette_index),
             width: PEN_WIDTH,
           },
           p,
@@ -448,7 +439,7 @@ impl Session {
         self.mode = Mode::Draw(
           Shape::Marker {
             points: vec![p],
-            color: PALETTE[self.palette_index % PALETTE.len()],
+            color: active_color(self.palette_index),
           },
           p,
         );
@@ -459,7 +450,7 @@ impl Session {
           Shape::Segment {
             from: p,
             to: p,
-            color: PALETTE[self.palette_index % PALETTE.len()],
+            color: active_color(self.palette_index),
             width: LINE_WIDTH,
           },
           p,
@@ -471,7 +462,7 @@ impl Session {
           Shape::Arrow {
             tail: p,
             head: p,
-            color: PALETTE[self.palette_index % PALETTE.len()],
+            color: active_color(self.palette_index),
             width: LINE_WIDTH,
           },
           p,
@@ -482,7 +473,7 @@ impl Session {
         self.mode = Mode::Draw(
           Shape::Outline {
             rect: Rect::new(p.x, p.y, 0.0, 0.0),
-            color: PALETTE[self.palette_index % PALETTE.len()],
+            color: active_color(self.palette_index),
             width: LINE_WIDTH,
           },
           p,
@@ -521,17 +512,10 @@ impl Session {
   }
 
   fn button_command(&self, index: usize, tools: bool) -> render::Command {
-    let chrome = render::build(
-      self.selection,
-      self.bounds,
-      self.tool,
-      &self.history,
-      self.mode.shows_chrome(),
-    );
     let button = if tools {
-      &chrome.tools[index]
+      &self.chrome.tools[index]
     } else {
-      &chrome.actions[index]
+      &self.chrome.actions[index]
     };
     button.command
   }
@@ -574,7 +558,7 @@ impl Session {
       let text = Shape::Caption {
         at: *anchor,
         text: std::mem::take(buffer),
-        color: PALETTE[self.palette_index % PALETTE.len()],
+        color: active_color(self.palette_index),
       };
       if text.is_complete() {
         self.history.push(text);

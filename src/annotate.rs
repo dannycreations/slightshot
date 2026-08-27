@@ -10,6 +10,10 @@ pub const PALETTE: [[u8; 3]; 7] = [
   [15, 23, 42],
 ];
 
+pub fn active_color(index: usize) -> [u8; 3] {
+  PALETTE[index % PALETTE.len()]
+}
+
 pub const PEN_WIDTH: f32 = 2.5;
 pub const LINE_WIDTH: f32 = 2.0;
 pub const MARKER_WIDTH: f32 = 16.0;
