@@ -74,29 +74,49 @@ unsafe {
 
 ---
 
-### 4. Keep all `use` statements at the top of the file — never use inline qualified paths
+### 4. Keep all imports at the module level and use imported names throughout the file
 
-Every dependency must be declared through `use` statements in the file header, keeping all imports visible in one place and preventing hidden or scattered dependencies. Do not declare imports inside functions, `impl` blocks, or other local scopes, and do not reference items through qualified paths inline in the code. Instead, import every required type, macro, enum variant, function, or module item at the top of the file and use its local name throughout the implementation.
+All dependencies used by a Rust module must be imported with `use` declarations at the **top level of the file**. The import section should be the single, explicit place where the module's external and internal dependencies are declared.
+
+**Do not:**
+
+- Put `use` declarations inside functions, methods, closures, `impl` blocks, traits, or any other nested scope.
+- Use inline qualified paths such as `std::collections::HashMap`, `crate::foo::Bar`, or `serde::Serialize` in implementation code when the referenced item can be imported at the top level.
+- Repeat a dependency's module path throughout the implementation.
+- Hide dependencies inside local scopes.
+
+**Do:**
+
+- Add every required type, trait, function, macro, enum variant, and module item to the file's top-level `use` section.
+- Use the imported name directly throughout the rest of the file.
+- Keep the complete dependency surface of the file visible from its top-level imports.
 
 ```rust
-// ✅ Correct — all dependencies declared at the top; code uses imported names
+// CORRECT: all dependencies are declared at the top level.
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use crate::foo::Bar;
 
 pub fn build_index(items: &[&str], state: &Bar) -> HashMap<&str, usize> {
-  items.iter().enumerate().map(|(i, k)| (*k, i)).collect()
-  // ...
+  items
+    .iter()
+    .enumerate()
+    .map(|(i, k)| (*k, i))
+    .collect()
 }
-```
 
-```rust
-// ❌ Forbidden — qualified path used inline instead of a top-level import
-pub fn build_index(items: &[&str], state: &crate::foo::Bar) -> std::collections::HashMap<&str, usize> {
-  // ❌ Forbidden — dependency declared inside the function body
-  use serde::{Deserialize, Serialize}; // hidden dependency, difficult to discover
+// FORBIDDEN: dependency referenced through a qualified path inline.
+pub fn build_index(
+  items: &[&str],
+  state: &crate::foo::Bar,
+) -> std::collections::HashMap<&str, usize> {
+  // FORBIDDEN: local import inside a function.
+  use serde::{Deserialize, Serialize};
 
-  items.iter().enumerate().map(|(i, k)| (*k, i)).collect()
-  // ...
+  items
+    .iter()
+    .enumerate()
+    .map(|(i, k)| (*k, i))
+    .collect()
 }
 ```

@@ -85,6 +85,7 @@ struct Session {
   mode: Mode,
   tool: Tool,
   palette_index: usize,
+  revision: usize,
   history: History,
   engine: TextEngine,
   cursor: Point,
@@ -92,6 +93,7 @@ struct Session {
   chrome: Chrome,
   dirty: Option<Rect>,
   scratch: Option<Pixmap>,
+  committed: Option<render::CommittedLayer>,
   pending: Option<Outcome>,
   modifiers: ModifiersState,
   sizes: HashMap<Tool, f32>,
@@ -295,6 +297,7 @@ impl Session {
       mode: Mode::Idle,
       tool: Tool::Select,
       palette_index: 0,
+      revision: 0,
       history: History::default(),
       engine: TextEngine::default(),
       cursor: Point::default(),
@@ -305,6 +308,7 @@ impl Session {
       },
       dirty: None,
       scratch: None,
+      committed: None,
       pending: None,
       modifiers: ModifiersState::default(),
       sizes: {
@@ -385,6 +389,7 @@ impl Session {
       draft,
       typing,
       palette_index: self.palette_index,
+      revision: self.revision,
       chrome,
       hotspot: self.hover,
       text,
@@ -397,7 +402,13 @@ impl Session {
       (Some(p), None) => Some(p),
     };
 
-    render::paint(frame, &scene, restore, &mut self.scratch);
+    render::paint(
+      frame,
+      &scene,
+      restore,
+      &mut self.committed,
+      &mut self.scratch,
+    );
     self.dirty = Some(curr.unwrap_or_default());
     self.present();
   }
@@ -468,6 +479,7 @@ impl Session {
           .moved_inside(self.bounds, Point::new(p.x - *last_x, p.y - *last_y));
         let delta = Point::new(moved.x - sel.x, moved.y - sel.y);
         self.history.translate_all(delta.x, delta.y);
+        self.revision += 1;
         self.selection = Some(moved);
         *last_x = p.x;
         *last_y = p.y;
@@ -587,7 +599,9 @@ impl Session {
         self.palette_index = (self.palette_index + 1) % PALETTE.len()
       }
       render::Command::Undo => {
-        self.history.undo();
+        if self.history.undo() {
+          self.revision += 1;
+        }
         self.window.request_redraw();
       }
       render::Command::Deliver(deliverable) => {
@@ -622,6 +636,7 @@ impl Session {
       }
       Mode::Draw(draft, _) if draft.is_complete() => {
         self.history.push(draft);
+        self.revision += 1;
       }
       Mode::Draw(_, _) => {}
       Mode::Move(_, _) | Mode::Resize(_, _) => {}
@@ -658,6 +673,7 @@ impl Session {
       };
       if text.is_complete() {
         self.history.push(text);
+        self.revision += 1;
       }
       self.mode = Mode::Idle;
       self.window.request_redraw();

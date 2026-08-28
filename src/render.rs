@@ -242,23 +242,30 @@ pub struct Scene<'a> {
   pub draft: Option<&'a Shape>,
   pub typing: Option<(Point, &'a str, f32)>,
   pub palette_index: usize,
+  pub revision: usize,
   pub chrome: &'a Chrome,
   pub hotspot: Option<Hotspot>,
   pub text: &'a TextEngine,
   pub hint: Option<&'a str>,
 }
 
+pub struct CommittedLayer {
+  revision: usize,
+  pixmap: Pixmap,
+}
+
 pub fn paint(
   pm: &mut Pixmap,
   scene: &Scene,
   restore: Option<Rect>,
+  committed: &mut Option<CommittedLayer>,
   scratch: &mut Option<Pixmap>,
 ) {
   match restore {
     None => pm.data_mut().copy_from_slice(scene.backdrop.data()),
     Some(rect) => restore_region(pm, scene.backdrop, rect),
   }
-  draw_annotations(pm, scene, scratch);
+  draw_annotations(pm, scene, committed, scratch);
   if let Some(sel) = scene.selection {
     draw_border(pm, sel);
     draw_handles(pm, sel);
@@ -419,36 +426,91 @@ fn prepare_layer(
 fn draw_annotations(
   pm: &mut Pixmap,
   scene: &Scene,
+  committed: &mut Option<CommittedLayer>,
   scratch: &mut Option<Pixmap>,
 ) {
   let Some(sel) = scene.selection else {
     return;
   };
-  let ink = active_color(scene.palette_index);
-  let typing = scene
-    .typing
-    .map(|(at, buffer, size)| (at, buffer, ink, size));
-  let Some((origin, w, h)) = prepare_layer(
-    scratch,
-    scene.frame,
-    sel,
-    scene.shapes,
-    scene.draft,
-    typing,
-    scene.text,
-  ) else {
+  let (x0, y0, width, height) =
+    region_pixels(sel, scene.frame.width() as i32, scene.frame.height() as i32);
+  if width <= 0 || height <= 0 {
     return;
+  }
+
+  // The committed layer holds the full canvas with every finished shape
+  // stroked on top, keyed by revision. Resizing only changes the selection
+  // rectangle, not the shapes, so the cache stays valid and we blit the
+  // visible region instead of re-stroking all shapes on every resize frame.
+  let stale = match committed.as_ref() {
+    None => true,
+    Some(cached) => cached.revision != scene.revision,
   };
-  let layer = scratch.as_ref().unwrap();
-  let stride = w as usize * 4;
+
+  if stale {
+    let mut layer = match committed.take() {
+      Some(cached)
+        if cached.pixmap.width() == scene.frame.width()
+          && cached.pixmap.height() == scene.frame.height() =>
+      {
+        cached.pixmap
+      }
+      _ => Pixmap::new(scene.frame.width(), scene.frame.height())
+        .expect("allocating the committed layer failed"),
+    };
+    layer.data_mut().copy_from_slice(scene.frame.data());
+    let origin = Point::new(0.0, 0.0);
+    for shape in scene.shapes {
+      draw_shape(&mut layer, shape, origin, scene.text);
+    }
+    *committed = Some(CommittedLayer {
+      revision: scene.revision,
+      pixmap: layer,
+    });
+  }
+
+  let cached = committed.as_ref().expect("committed layer built above");
+
+  let mut layer = match scratch.take() {
+    Some(p) if p.width() == width as u32 && p.height() == height as u32 => p,
+    _ => Pixmap::new(width as u32, height as u32)
+      .expect("allocating the annotation layer failed"),
+  };
+  copy_region(
+    &mut layer,
+    cached.pixmap.data(),
+    cached.pixmap.width() as usize,
+    x0,
+    y0,
+  );
+
+  let origin = Point::new(x0 as f32, y0 as f32);
+  if let Some(draft) = scene.draft {
+    draw_shape(&mut layer, draft, origin, scene.text);
+  }
+  if let Some((at, buffer, size)) = scene.typing {
+    let ink = active_color(scene.palette_index);
+    scene.text.draw(
+      &mut layer,
+      buffer,
+      at.x - origin.x,
+      at.y - origin.y,
+      size,
+      ink,
+    );
+  }
+
+  let stride = width as usize * 4;
   let canvas_w = pm.width() as usize;
   let source = layer.data();
   let target = pm.data_mut();
-  for row in 0..h as usize {
+  for row in 0..height as usize {
     let from = row * stride;
-    let to = ((origin.y as usize + row) * canvas_w + origin.x as usize) * 4;
+    let to = ((y0 as usize + row) * canvas_w + x0 as usize) * 4;
     target[to..to + stride].copy_from_slice(&source[from..from + stride]);
   }
+
+  *scratch = Some(layer);
 }
 
 fn copy_region(
@@ -932,6 +994,91 @@ mod tests {
     assert!(
       body > 4,
       "arrowhead body should be wider than the line, got {body} painted pixels"
+    );
+  }
+
+  #[test]
+  fn committed_layer_caches_committed_shapes() {
+    let Ok(engine) = TextEngine::load() else {
+      return;
+    };
+    let mut canvas = Pixmap::new(40, 80).unwrap();
+    for px in canvas.data_mut().as_chunks_mut::<4>().0 {
+      px.copy_from_slice(&[200, 200, 200, 255]);
+    }
+    let backdrop = dimmed_copy(&canvas);
+    let bounds = Rect::new(0.0, 0.0, 40.0, 80.0);
+    let sel = Rect::new(5.0, 5.0, 30.0, 70.0);
+    let selection = Some(sel);
+    let mut history = History::default();
+    history.push(Shape::Segment {
+      from: Point::new(10.0, 50.0),
+      to: Point::new(30.0, 70.0),
+      color: [255, 0, 0],
+      width: 3.0,
+    });
+    let chrome = build(selection, bounds, Tool::Select, &history, false);
+    let shot = flatten(&canvas, sel, history.shapes(), &engine);
+
+    let mut committed: Option<CommittedLayer> = None;
+    let mut scratch: Option<Pixmap> = None;
+    let mut pm = backdrop.clone();
+
+    let scene = Scene {
+      frame: &canvas,
+      backdrop: &backdrop,
+      bounds,
+      selection,
+      shapes: history.shapes(),
+      draft: None,
+      typing: None,
+      palette_index: 0,
+      revision: 0,
+      chrome: &chrome,
+      hotspot: None,
+      text: &engine,
+      hint: None,
+    };
+
+    let restore = dirty_rect(selection, &chrome, bounds, &engine, None, None);
+    paint(&mut pm, &scene, restore, &mut committed, &mut scratch);
+
+    let cached = committed
+      .as_ref()
+      .expect("committed layer built on first frame");
+    assert_eq!(cached.pixmap.width(), 40);
+    assert_eq!(cached.pixmap.height(), 80);
+    assert_eq!(cached.revision, 0);
+
+    // The committed layer now spans the full canvas with the committed
+    // shapes stroked on top. Its pixel at canvas point (20, 60) must match
+    // what flatten exports for the same point inside the 30x70 region.
+    let canvas_idx = (60 * 40 + 20) * 4;
+    let region_idx = (55 * 30 + 15) * 4;
+    assert_eq!(
+      &cached.pixmap.data()[canvas_idx..canvas_idx + 4],
+      &shot.rgba[region_idx..region_idx + 4]
+    );
+
+    // The composited frame must reproduce the same pixel at a point that is
+    // not covered by the selection badge, border, or resize handles.
+    let pm_idx = (60 * 40 + 20) * 4;
+    assert_eq!(
+      &pm.data()[pm_idx..pm_idx + 4],
+      &shot.rgba[region_idx..region_idx + 4]
+    );
+    let px = &pm.data()[pm_idx..pm_idx + 4];
+    assert!(
+      px[0] > 150 && px[2] < 100,
+      "expected a red stroke pixel, got {px:?}"
+    );
+
+    // A second identical frame must reproduce the same pixels.
+    let restore = dirty_rect(selection, &chrome, bounds, &engine, None, None);
+    paint(&mut pm, &scene, restore, &mut committed, &mut scratch);
+    assert_eq!(
+      &pm.data()[pm_idx..pm_idx + 4],
+      &shot.rgba[region_idx..region_idx + 4]
     );
   }
 }
