@@ -476,9 +476,8 @@ impl Session {
         let sel = self.selection.expect("move mode requires a selection");
         let moved = sel
           .moved_inside(self.bounds, Point::new(p.x - *last_x, p.y - *last_y));
-        let delta = Point::new(moved.x - sel.x, moved.y - sel.y);
-        self.history.translate_all(delta.x, delta.y);
-        self.revision += 1;
+        // Shapes are stored in absolute screenshot coordinates, so dragging
+        // the selection rectangle must not shift them.
         self.selection = Some(moved);
         *last_x = p.x;
         *last_y = p.y;

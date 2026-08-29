@@ -115,29 +115,6 @@ impl Shape {
       Shape::Caption { text, .. } => !text.trim().is_empty(),
     }
   }
-
-  pub fn translate(&mut self, dx: f32, dy: f32) {
-    let bump = |p: &mut Point| {
-      p.x += dx;
-      p.y += dy;
-    };
-    match self {
-      Shape::Freehand { points, .. } | Shape::Marker { points, .. } => {
-        points.iter_mut().for_each(bump);
-      }
-      Shape::Segment { from, to, .. }
-      | Shape::Arrow {
-        tail: from,
-        head: to,
-        ..
-      } => {
-        bump(from);
-        bump(to);
-      }
-      Shape::Outline { rect, .. } => *rect = rect.translated(dx, dy),
-      Shape::Caption { at, .. } => bump(at),
-    }
-  }
 }
 
 #[derive(Default)]
@@ -160,12 +137,6 @@ impl History {
 
   pub fn can_undo(&self) -> bool {
     !self.applied.is_empty()
-  }
-
-  pub fn translate_all(&mut self, dx: f32, dy: f32) {
-    for shape in &mut self.applied {
-      shape.translate(dx, dy);
-    }
   }
 }
 
@@ -210,61 +181,5 @@ mod tests {
     };
     assert!(!stray.is_complete());
     assert!(!stub.is_complete());
-  }
-
-  #[test]
-  fn translate_moves_every_variant() {
-    let mut shape = Shape::Segment {
-      from: Point::new(0.0, 0.0),
-      to: Point::new(4.0, 0.0),
-      color: PALETTE[2],
-      width: LINE_WIDTH,
-    };
-    shape.translate(10.0, 5.0);
-    assert_eq!(
-      shape,
-      Shape::Segment {
-        from: Point::new(10.0, 5.0),
-        to: Point::new(14.0, 5.0),
-        color: PALETTE[2],
-        width: LINE_WIDTH,
-      }
-    );
-  }
-
-  #[test]
-  fn history_translate_all_moves_shapes_together() {
-    let mut history = History::default();
-    history.push(Shape::Segment {
-      from: Point::new(0.0, 0.0),
-      to: Point::new(4.0, 0.0),
-      color: PALETTE[2],
-      width: LINE_WIDTH,
-    });
-    history.push(Shape::Caption {
-      at: Point::new(2.0, 2.0),
-      text: "hi".to_string(),
-      color: PALETTE[0],
-      size: LABEL_SIZE,
-    });
-    history.translate_all(1.0, 1.0);
-    assert_eq!(
-      history.shapes()[0],
-      Shape::Segment {
-        from: Point::new(1.0, 1.0),
-        to: Point::new(5.0, 1.0),
-        color: PALETTE[2],
-        width: LINE_WIDTH,
-      }
-    );
-    assert_eq!(
-      history.shapes()[1],
-      Shape::Caption {
-        at: Point::new(3.0, 3.0),
-        text: "hi".to_string(),
-        color: PALETTE[0],
-        size: LABEL_SIZE,
-      }
-    );
   }
 }
