@@ -18,8 +18,6 @@ const PANEL_PAD: f32 = 5.0;
 const BADGE_TEXT: f32 = 18.0;
 const BADGE_GAP: f32 = 5.0;
 const ICON_BOX: f32 = 18.0;
-const HANDLE_MARGIN: f32 = 8.0;
-const BUTTON_MARGIN: f32 = 4.0;
 const TOOLTIP_TEXT: f32 = 14.0;
 const TOOLTIP_PAD: f32 = 5.0;
 const TOOLTIP_GAP: f32 = 6.0;
@@ -234,37 +232,39 @@ fn layout_horizontal(
 }
 
 pub struct Scene<'a> {
-  pub frame: &'a Pixmap,
   pub backdrop: &'a Pixmap,
+  pub canvas: &'a Pixmap,
   pub bounds: Rect,
   pub selection: Option<Rect>,
   pub shapes: &'a [Shape],
   pub draft: Option<&'a Shape>,
   pub typing: Option<(Point, &'a str, f32)>,
   pub palette_index: usize,
-  pub revision: usize,
   pub chrome: &'a Chrome,
   pub hotspot: Option<Hotspot>,
   pub text: &'a TextEngine,
   pub hint: Option<&'a str>,
 }
 
-pub struct CommittedLayer {
-  revision: usize,
-  pixmap: Pixmap,
-}
-
-pub fn paint(
-  pm: &mut Pixmap,
-  scene: &Scene,
-  restore: Option<Rect>,
-  committed: &mut Option<CommittedLayer>,
-) {
-  match restore {
-    None => pm.data_mut().copy_from_slice(scene.backdrop.data()),
-    Some(rect) => blit_region(pm, scene.backdrop, rect),
+pub fn paint(pm: &mut Pixmap, scene: &Scene) {
+  pm.data_mut().copy_from_slice(scene.backdrop.data());
+  if let Some(sel) = scene.selection {
+    let (x0, y0, width, height) =
+      region_pixels(sel, pm.width() as i32, pm.height() as i32);
+    if width <= 0 || height <= 0 {
+      return;
+    }
+    let stride = width as usize * 4;
+    let px_w = pm.width() as usize;
+    let source = scene.canvas.data();
+    let target = pm.data_mut();
+    for row in 0..height as usize {
+      let offset = ((y0 as usize + row) * px_w + x0 as usize) * 4;
+      target[offset..offset + stride]
+        .copy_from_slice(&source[offset..offset + stride]);
+    }
   }
-  draw_annotations(pm, scene, committed);
+  draw_annotations(pm, scene);
   if let Some(sel) = scene.selection {
     draw_border(pm, sel);
     draw_handles(pm, sel);
@@ -292,90 +292,6 @@ pub fn dimmed_copy(frame: &Pixmap) -> Pixmap {
     }
   }
   pm
-}
-
-fn blit_region(target: &mut Pixmap, source: &Pixmap, rect: Rect) {
-  let px_w = target.width() as i32;
-  let px_h = target.height() as i32;
-  if px_w == 0 || px_h == 0 {
-    return;
-  }
-  let x0 = rect.x.floor().max(0.0) as i32;
-  let y0 = rect.y.floor().max(0.0) as i32;
-  let width = (rect.right().ceil() as i32 - x0).clamp(1, px_w - x0);
-  let height = (rect.bottom().ceil() as i32 - y0).clamp(1, px_h - y0);
-  if width <= 0 || height <= 0 {
-    return;
-  }
-  let stride = width as usize * 4;
-  let source_data = source.data();
-  let target_data = target.data_mut();
-  for row in 0..height as usize {
-    let offset = ((y0 as usize + row) * px_w as usize + x0 as usize) * 4;
-    target_data[offset..offset + stride]
-      .copy_from_slice(&source_data[offset..offset + stride]);
-  }
-}
-
-pub fn dirty_rect(
-  selection: Option<Rect>,
-  chrome: &Chrome,
-  bounds: Rect,
-  engine: &TextEngine,
-  hotspot: Option<Hotspot>,
-  hint: Option<&str>,
-) -> Option<Rect> {
-  let sel = selection?;
-  let mut dirty = sel.inflated(HANDLE_MARGIN);
-  dirty = dirty.union(badge_rect(sel, bounds, engine));
-  for button in &chrome.tools {
-    dirty = dirty.union(button.area.inflated(BUTTON_MARGIN));
-  }
-  for button in &chrome.actions {
-    dirty = dirty.union(button.area.inflated(BUTTON_MARGIN));
-  }
-  if let Some(hotspot) = hotspot {
-    let button = match hotspot {
-      Hotspot::Tool(i) => chrome.tools.get(i),
-      Hotspot::Action(i) => chrome.actions.get(i),
-    };
-    if let Some(button) = button {
-      dirty = dirty.union(tooltip_rect(
-        button.area,
-        button.command.label(),
-        bounds,
-        engine,
-        tooltip_side(hotspot),
-      ));
-    }
-  }
-  if let Some(hint_text) = hint {
-    if let Some(button) = chrome.tools.iter().find(|b| b.active) {
-      dirty = dirty.union(tooltip_rect(
-        button.area,
-        hint_text,
-        bounds,
-        engine,
-        Side::Left,
-      ));
-    }
-  }
-  Some(dirty)
-}
-
-fn badge_rect(sel: Rect, bounds: Rect, engine: &TextEngine) -> Rect {
-  let label = format!("{}x{}", sel.w.round() as i64, sel.h.round() as i64);
-  let text_width = engine.width(&label, BADGE_TEXT);
-  let pad = 6.0;
-  let box_w = text_width + pad * 2.0;
-  let box_h = BADGE_TEXT + 7.0;
-  let mut bx = sel.x;
-  let mut by = sel.y - box_h - BADGE_GAP;
-  if by < bounds.y {
-    by = sel.y + BADGE_GAP;
-  }
-  bx = bx.clamp(bounds.x, (bounds.right() - box_w).max(bounds.x));
-  Rect::new(bx, by, box_w, box_h)
 }
 
 fn prepare_layer(
@@ -422,59 +338,11 @@ fn prepare_layer(
   Some((origin, width as u32, height as u32))
 }
 
-fn draw_annotations(
-  pm: &mut Pixmap,
-  scene: &Scene,
-  committed: &mut Option<CommittedLayer>,
-) {
-  let Some(sel) = scene.selection else {
-    return;
-  };
-  let (x0, y0, width, height) =
-    region_pixels(sel, scene.frame.width() as i32, scene.frame.height() as i32);
-  if width <= 0 || height <= 0 {
-    return;
-  }
-
-  // The committed layer holds the full canvas with every finished shape
-  // stroked on top, keyed by revision. Resizing only changes the selection
-  // rectangle, not the shapes, so the cache stays valid and we blit the
-  // visible region instead of re-stroking all shapes on every resize frame.
-  let stale = match committed.as_ref() {
-    None => true,
-    Some(cached) => cached.revision != scene.revision,
-  };
-
-  if stale {
-    let mut layer = match committed.take() {
-      Some(cached)
-        if cached.pixmap.width() == scene.frame.width()
-          && cached.pixmap.height() == scene.frame.height() =>
-      {
-        cached.pixmap
-      }
-      _ => Pixmap::new(scene.frame.width(), scene.frame.height())
-        .expect("allocating the committed layer failed"),
-    };
-    layer.data_mut().copy_from_slice(scene.frame.data());
-    let origin = Point::new(0.0, 0.0);
-    for shape in scene.shapes {
-      draw_shape(&mut layer, shape, origin, scene.text);
-    }
-    *committed = Some(CommittedLayer {
-      revision: scene.revision,
-      pixmap: layer,
-    });
-  }
-
-  let cached = committed.as_ref().expect("committed layer built above");
-  blit_region(
-    pm,
-    &cached.pixmap,
-    Rect::new(x0 as f32, y0 as f32, width as f32, height as f32),
-  );
-
+fn draw_annotations(pm: &mut Pixmap, scene: &Scene) {
   let origin = Point::new(0.0, 0.0);
+  for shape in scene.shapes {
+    draw_shape(pm, shape, origin, scene.text);
+  }
   if let Some(draft) = scene.draft {
     draw_shape(pm, draft, origin, scene.text);
   }
@@ -713,13 +581,6 @@ fn draw_button(
 enum Side {
   Left,
   Above,
-}
-
-fn tooltip_side(hotspot: Hotspot) -> Side {
-  match hotspot {
-    Hotspot::Tool(_) => Side::Left,
-    Hotspot::Action(_) => Side::Above,
-  }
 }
 
 fn tooltip_rect(
@@ -971,90 +832,6 @@ mod tests {
   }
 
   #[test]
-  fn committed_layer_caches_committed_shapes() {
-    let Ok(engine) = TextEngine::load() else {
-      return;
-    };
-    let mut canvas = Pixmap::new(40, 80).unwrap();
-    for px in canvas.data_mut().as_chunks_mut::<4>().0 {
-      px.copy_from_slice(&[200, 200, 200, 255]);
-    }
-    let backdrop = dimmed_copy(&canvas);
-    let bounds = Rect::new(0.0, 0.0, 40.0, 80.0);
-    let sel = Rect::new(5.0, 5.0, 30.0, 70.0);
-    let selection = Some(sel);
-    let mut history = History::default();
-    history.push(Shape::Segment {
-      from: Point::new(10.0, 50.0),
-      to: Point::new(30.0, 70.0),
-      color: [255, 0, 0],
-      width: 3.0,
-    });
-    let chrome = build(selection, bounds, Tool::Select, &history, false);
-    let shot = flatten(&canvas, sel, history.shapes(), &engine);
-
-    let mut committed: Option<CommittedLayer> = None;
-    let mut pm = backdrop.clone();
-
-    let scene = Scene {
-      frame: &canvas,
-      backdrop: &backdrop,
-      bounds,
-      selection,
-      shapes: history.shapes(),
-      draft: None,
-      typing: None,
-      palette_index: 0,
-      revision: 0,
-      chrome: &chrome,
-      hotspot: None,
-      text: &engine,
-      hint: None,
-    };
-
-    let restore = dirty_rect(selection, &chrome, bounds, &engine, None, None);
-    paint(&mut pm, &scene, restore, &mut committed);
-
-    let cached = committed
-      .as_ref()
-      .expect("committed layer built on first frame");
-    assert_eq!(cached.pixmap.width(), 40);
-    assert_eq!(cached.pixmap.height(), 80);
-    assert_eq!(cached.revision, 0);
-
-    // The committed layer now spans the full canvas with the committed
-    // shapes stroked on top. Its pixel at canvas point (20, 60) must match
-    // what flatten exports for the same point inside the 30x70 region.
-    let canvas_idx = (60 * 40 + 20) * 4;
-    let region_idx = (55 * 30 + 15) * 4;
-    assert_eq!(
-      &cached.pixmap.data()[canvas_idx..canvas_idx + 4],
-      &shot.rgba[region_idx..region_idx + 4]
-    );
-
-    // The composited frame must reproduce the same pixel at a point that is
-    // not covered by the selection badge, border, or resize handles.
-    let pm_idx = (60 * 40 + 20) * 4;
-    assert_eq!(
-      &pm.data()[pm_idx..pm_idx + 4],
-      &shot.rgba[region_idx..region_idx + 4]
-    );
-    let px = &pm.data()[pm_idx..pm_idx + 4];
-    assert!(
-      px[0] > 150 && px[2] < 100,
-      "expected a red stroke pixel, got {px:?}"
-    );
-
-    // A second identical frame must reproduce the same pixels.
-    let restore = dirty_rect(selection, &chrome, bounds, &engine, None, None);
-    paint(&mut pm, &scene, restore, &mut committed);
-    assert_eq!(
-      &pm.data()[pm_idx..pm_idx + 4],
-      &shot.rgba[region_idx..region_idx + 4]
-    );
-  }
-
-  #[test]
   fn draft_is_stroked_at_absolute_coordinates() {
     let Ok(engine) = TextEngine::load() else {
       return;
@@ -1078,26 +855,24 @@ mod tests {
       width: 3.0,
     };
 
-    let mut committed: Option<CommittedLayer> = None;
     let mut pm = backdrop.clone();
 
     let scene = Scene {
-      frame: &canvas,
       backdrop: &backdrop,
+      canvas: &canvas,
       bounds,
       selection,
       shapes: history.shapes(),
       draft: Some(&draft),
       typing: None,
       palette_index: 0,
-      revision: 0,
       chrome: &chrome,
       hotspot: None,
       text: &engine,
       hint: None,
     };
 
-    paint(&mut pm, &scene, None, &mut committed);
+    paint(&mut pm, &scene);
 
     // The stroke must land at the absolute endpoint (30, 70), not shifted by
     // the selection origin. A selection-local offset would place it near

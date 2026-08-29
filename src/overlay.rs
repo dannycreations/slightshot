@@ -85,14 +85,11 @@ struct Session {
   mode: Mode,
   tool: Tool,
   palette_index: usize,
-  revision: usize,
   history: History,
   engine: TextEngine,
   cursor: Point,
   hover: Option<Hotspot>,
   chrome: Chrome,
-  dirty: Option<Rect>,
-  committed: Option<render::CommittedLayer>,
   screen: Vec<u32>,
   pending: Option<Outcome>,
   modifiers: ModifiersState,
@@ -297,7 +294,6 @@ impl Session {
       mode: Mode::Idle,
       tool: Tool::Select,
       palette_index: 0,
-      revision: 0,
       history: History::default(),
       engine: TextEngine::default(),
       cursor: Point::default(),
@@ -306,8 +302,6 @@ impl Session {
         tools: Vec::new(),
         actions: Vec::new(),
       },
-      dirty: None,
-      committed: None,
       screen: Vec::new(),
       pending: None,
       modifiers: ModifiersState::default(),
@@ -352,62 +346,33 @@ impl Session {
       self.mode.shows_chrome(),
     );
     let chrome = &self.chrome;
-    let canvas = &self.canvas;
     let backdrop = &self.backdrop;
     let shapes = self.history.shapes();
     let draft = self.mode.draft();
     let typing = Self::typing(&self.mode, self.size(Tool::Label));
     let text = &self.engine;
 
-    let prev = self.dirty;
-    let typing_rect = typing.map(|(at, buffer, size)| {
-      Rect::new(at.x, at.y, text.width(buffer, size), size)
-    });
-    let curr = match (
-      render::dirty_rect(
-        self.selection,
-        chrome,
-        self.bounds,
-        text,
-        self.hover,
-        self.hint.as_deref(),
-      ),
-      typing_rect,
-    ) {
-      (base, None) => base,
-      (None, Some(c)) => Some(c),
-      (Some(b), Some(c)) => Some(b.union(c)),
-    };
-
     let frame = &mut self.frame;
     let scene = Scene {
-      frame: canvas,
       backdrop,
+      canvas: &self.canvas,
       bounds: self.bounds,
       selection: self.selection,
       shapes,
       draft,
       typing,
       palette_index: self.palette_index,
-      revision: self.revision,
       chrome,
       hotspot: self.hover,
       text,
       hint: self.hint.as_deref(),
     };
 
-    let restore = match (prev, curr) {
-      (None, _) => None,
-      (Some(p), Some(c)) => Some(p.union(c)),
-      (Some(p), None) => Some(p),
-    };
-
-    render::paint(frame, &scene, restore, &mut self.committed);
-    self.dirty = Some(curr.unwrap_or_default());
-    self.present(restore);
+    render::paint(frame, &scene);
+    self.present();
   }
 
-  fn present(&mut self, restore: Option<Rect>) {
+  fn present(&mut self) {
     let Ok(mut buffer) = self.surface.buffer_mut() else {
       return;
     };
@@ -418,10 +383,8 @@ impl Session {
     }
     if self.screen.len() != w * h {
       self.screen = vec![0u32; w * h];
-      pack_region(self.frame.data(), &mut self.screen, w, None);
-    } else {
-      pack_region(self.frame.data(), &mut self.screen, w, restore);
     }
+    pack_region(self.frame.data(), &mut self.screen, w, None);
     buffer.copy_from_slice(&self.screen);
     let _ = buffer.present();
   }
@@ -598,9 +561,8 @@ impl Session {
       }
       render::Command::Undo => {
         if self.history.undo() {
-          self.revision += 1;
+          self.window.request_redraw();
         }
-        self.window.request_redraw();
       }
       render::Command::Deliver(deliverable) => {
         if let Some(outcome) = self.deliver(deliverable) {
@@ -634,7 +596,6 @@ impl Session {
       }
       Mode::Draw(draft, _) if draft.is_complete() => {
         self.history.push(draft);
-        self.revision += 1;
       }
       Mode::Draw(_, _) => {}
       Mode::Move(_, _) | Mode::Resize(_, _) => {}
@@ -671,7 +632,6 @@ impl Session {
       };
       if text.is_complete() {
         self.history.push(text);
-        self.revision += 1;
       }
       self.mode = Mode::Idle;
       self.window.request_redraw();
