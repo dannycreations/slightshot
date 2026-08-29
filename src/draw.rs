@@ -1,4 +1,7 @@
-use std::sync::OnceLock;
+use std::{
+  collections::HashMap,
+  sync::{Arc, Mutex, OnceLock},
+};
 
 use tiny_skia::{
   Color, FillRule, LineCap, LineJoin, Paint, Path, PathBuilder, Pixmap,
@@ -291,39 +294,52 @@ impl Icon {
     box_size: f32,
     color: [u8; 3],
   ) {
-    let sprite = sprite(self);
-    let scale = box_size / sprite.width() as f32;
-    let w = (sprite.width() as f32 * scale).round() as u32;
-    let h = (sprite.height() as f32 * scale).round() as u32;
+    let tinted = tinted_sprite(self, color, box_size);
+    let sprite: &Pixmap = &tinted;
     let x = (center.x - box_size / 2.0).round() as i32;
     let y = (center.y - box_size / 2.0).round() as i32;
-
-    let mut tinted =
-      Pixmap::new(w, h).expect("allocating the icon pixmap failed");
-    tinted.draw_pixmap(
-      0,
-      0,
-      sprite.as_ref(),
-      &PixmapPaint::default(),
-      Transform::from_scale(scale, scale),
-      None,
-    );
-    for pixel in tinted.data_mut().chunks_mut(4) {
-      let a = pixel[3] as u32;
-      pixel[0] = ((color[0] as u32 * a) / 255) as u8;
-      pixel[1] = ((color[1] as u32 * a) / 255) as u8;
-      pixel[2] = ((color[2] as u32 * a) / 255) as u8;
-    }
-
     pm.draw_pixmap(
       x,
       y,
-      tinted.as_ref(),
+      sprite.as_ref(),
       &PixmapPaint::default(),
       Transform::identity(),
       None,
     );
   }
+}
+
+type TintCache = HashMap<(usize, [u8; 3], u32), Arc<Pixmap>>;
+
+fn tinted_sprite(icon: Icon, color: [u8; 3], box_size: f32) -> Arc<Pixmap> {
+  static CACHE: OnceLock<Mutex<TintCache>> = OnceLock::new();
+  let mut cache = CACHE.get_or_init(Default::default).lock().unwrap();
+  cache
+    .entry((icon as usize, color, box_size.to_bits()))
+    .or_insert_with(|| {
+      let source = sprite(icon);
+      let scale = box_size / source.width() as f32;
+      let w = (source.width() as f32 * scale).round() as u32;
+      let h = (source.height() as f32 * scale).round() as u32;
+      let mut tinted =
+        Pixmap::new(w, h).expect("allocating the icon pixmap failed");
+      tinted.draw_pixmap(
+        0,
+        0,
+        source.as_ref(),
+        &PixmapPaint::default(),
+        Transform::from_scale(scale, scale),
+        None,
+      );
+      for pixel in tinted.data_mut().chunks_mut(4) {
+        let a = pixel[3] as u32;
+        pixel[0] = ((color[0] as u32 * a) / 255) as u8;
+        pixel[1] = ((color[1] as u32 * a) / 255) as u8;
+        pixel[2] = ((color[2] as u32 * a) / 255) as u8;
+      }
+      Arc::new(tinted)
+    })
+    .clone()
 }
 
 const ICONS: [Icon; 11] = [

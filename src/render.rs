@@ -259,13 +259,12 @@ pub fn paint(
   scene: &Scene,
   restore: Option<Rect>,
   committed: &mut Option<CommittedLayer>,
-  scratch: &mut Option<Pixmap>,
 ) {
   match restore {
     None => pm.data_mut().copy_from_slice(scene.backdrop.data()),
-    Some(rect) => restore_region(pm, scene.backdrop, rect),
+    Some(rect) => blit_region(pm, scene.backdrop, rect),
   }
-  draw_annotations(pm, scene, committed, scratch);
+  draw_annotations(pm, scene, committed);
   if let Some(sel) = scene.selection {
     draw_border(pm, sel);
     draw_handles(pm, sel);
@@ -295,7 +294,7 @@ pub fn dimmed_copy(frame: &Pixmap) -> Pixmap {
   pm
 }
 
-fn restore_region(target: &mut Pixmap, source: &Pixmap, rect: Rect) {
+fn blit_region(target: &mut Pixmap, source: &Pixmap, rect: Rect) {
   let px_w = target.width() as i32;
   let px_h = target.height() as i32;
   if px_w == 0 || px_h == 0 {
@@ -427,7 +426,6 @@ fn draw_annotations(
   pm: &mut Pixmap,
   scene: &Scene,
   committed: &mut Option<CommittedLayer>,
-  scratch: &mut Option<Pixmap>,
 ) {
   let Some(sel) = scene.selection else {
     return;
@@ -470,47 +468,22 @@ fn draw_annotations(
   }
 
   let cached = committed.as_ref().expect("committed layer built above");
-
-  let mut layer = match scratch.take() {
-    Some(p) if p.width() == width as u32 && p.height() == height as u32 => p,
-    _ => Pixmap::new(width as u32, height as u32)
-      .expect("allocating the annotation layer failed"),
-  };
-  copy_region(
-    &mut layer,
-    cached.pixmap.data(),
-    cached.pixmap.width() as usize,
-    x0,
-    y0,
+  blit_region(
+    pm,
+    &cached.pixmap,
+    Rect::new(x0 as f32, y0 as f32, width as f32, height as f32),
   );
 
-  let origin = Point::new(x0 as f32, y0 as f32);
+  let origin = Point::new(0.0, 0.0);
   if let Some(draft) = scene.draft {
-    draw_shape(&mut layer, draft, origin, scene.text);
+    draw_shape(pm, draft, origin, scene.text);
   }
   if let Some((at, buffer, size)) = scene.typing {
     let ink = active_color(scene.palette_index);
-    scene.text.draw(
-      &mut layer,
-      buffer,
-      at.x - origin.x,
-      at.y - origin.y,
-      size,
-      ink,
-    );
+    scene
+      .text
+      .draw(pm, buffer, at.x - origin.x, at.y - origin.y, size, ink);
   }
-
-  let stride = width as usize * 4;
-  let canvas_w = pm.width() as usize;
-  let source = layer.data();
-  let target = pm.data_mut();
-  for row in 0..height as usize {
-    let from = row * stride;
-    let to = ((y0 as usize + row) * canvas_w + x0 as usize) * 4;
-    target[to..to + stride].copy_from_slice(&source[from..from + stride]);
-  }
-
-  *scratch = Some(layer);
 }
 
 fn copy_region(
@@ -1021,7 +994,6 @@ mod tests {
     let shot = flatten(&canvas, sel, history.shapes(), &engine);
 
     let mut committed: Option<CommittedLayer> = None;
-    let mut scratch: Option<Pixmap> = None;
     let mut pm = backdrop.clone();
 
     let scene = Scene {
@@ -1041,7 +1013,7 @@ mod tests {
     };
 
     let restore = dirty_rect(selection, &chrome, bounds, &engine, None, None);
-    paint(&mut pm, &scene, restore, &mut committed, &mut scratch);
+    paint(&mut pm, &scene, restore, &mut committed);
 
     let cached = committed
       .as_ref()
@@ -1075,10 +1047,66 @@ mod tests {
 
     // A second identical frame must reproduce the same pixels.
     let restore = dirty_rect(selection, &chrome, bounds, &engine, None, None);
-    paint(&mut pm, &scene, restore, &mut committed, &mut scratch);
+    paint(&mut pm, &scene, restore, &mut committed);
     assert_eq!(
       &pm.data()[pm_idx..pm_idx + 4],
       &shot.rgba[region_idx..region_idx + 4]
+    );
+  }
+
+  #[test]
+  fn draft_is_stroked_at_absolute_coordinates() {
+    let Ok(engine) = TextEngine::load() else {
+      return;
+    };
+    let mut canvas = Pixmap::new(40, 80).unwrap();
+    for px in canvas.data_mut().as_chunks_mut::<4>().0 {
+      px.copy_from_slice(&[200, 200, 200, 255]);
+    }
+    let backdrop = dimmed_copy(&canvas);
+    let bounds = Rect::new(0.0, 0.0, 40.0, 80.0);
+    let sel = Rect::new(5.0, 5.0, 30.0, 70.0);
+    let selection = Some(sel);
+    let history = History::default();
+    let chrome = build(selection, bounds, Tool::Select, &history, false);
+
+    // Draft endpoint is given in full-frame coordinates.
+    let draft = Shape::Segment {
+      from: Point::new(10.0, 50.0),
+      to: Point::new(30.0, 70.0),
+      color: [255, 0, 0],
+      width: 3.0,
+    };
+
+    let mut committed: Option<CommittedLayer> = None;
+    let mut pm = backdrop.clone();
+
+    let scene = Scene {
+      frame: &canvas,
+      backdrop: &backdrop,
+      bounds,
+      selection,
+      shapes: history.shapes(),
+      draft: Some(&draft),
+      typing: None,
+      palette_index: 0,
+      revision: 0,
+      chrome: &chrome,
+      hotspot: None,
+      text: &engine,
+      hint: None,
+    };
+
+    paint(&mut pm, &scene, None, &mut committed);
+
+    // The stroke must land at the absolute endpoint (30, 70), not shifted by
+    // the selection origin. A selection-local offset would place it near
+    // (25, 65) instead.
+    let idx = (70 * 40 + 30) * 4;
+    let px = &pm.data()[idx..idx + 4];
+    assert!(
+      px[0] > 150 && px[2] < 100,
+      "draft should appear at (30, 70), got {px:?}"
     );
   }
 }

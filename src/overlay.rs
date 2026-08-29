@@ -92,8 +92,8 @@ struct Session {
   hover: Option<Hotspot>,
   chrome: Chrome,
   dirty: Option<Rect>,
-  scratch: Option<Pixmap>,
   committed: Option<render::CommittedLayer>,
+  screen: Vec<u32>,
   pending: Option<Outcome>,
   modifiers: ModifiersState,
   sizes: HashMap<Tool, f32>,
@@ -307,8 +307,8 @@ impl Session {
         actions: Vec::new(),
       },
       dirty: None,
-      scratch: None,
       committed: None,
+      screen: Vec::new(),
       pending: None,
       modifiers: ModifiersState::default(),
       sizes: {
@@ -402,28 +402,27 @@ impl Session {
       (Some(p), None) => Some(p),
     };
 
-    render::paint(
-      frame,
-      &scene,
-      restore,
-      &mut self.committed,
-      &mut self.scratch,
-    );
+    render::paint(frame, &scene, restore, &mut self.committed);
     self.dirty = Some(curr.unwrap_or_default());
-    self.present();
+    self.present(restore);
   }
 
-  fn present(&mut self) {
+  fn present(&mut self, restore: Option<Rect>) {
     let Ok(mut buffer) = self.surface.buffer_mut() else {
       return;
     };
-    for (pixel, rgba) in
-      buffer.iter_mut().zip(self.frame.data().as_chunks::<4>().0)
-    {
-      let [r, g, b, _] = *rgba;
-      *pixel =
-        (0xFFu32 << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
+    let w = self.frame.width() as usize;
+    let h = self.frame.height() as usize;
+    if w == 0 || h == 0 {
+      return;
     }
+    if self.screen.len() != w * h {
+      self.screen = vec![0u32; w * h];
+      pack_region(self.frame.data(), &mut self.screen, w, None);
+    } else {
+      pack_region(self.frame.data(), &mut self.screen, w, restore);
+    }
+    buffer.copy_from_slice(&self.screen);
     let _ = buffer.present();
   }
 
@@ -724,6 +723,34 @@ impl Session {
   }
 }
 
+fn pack_region(rgba: &[u8], out: &mut [u32], w: usize, region: Option<Rect>) {
+  let h = out.len() / w;
+  let (x0, y0, x1, y1) = match region {
+    None => (0, 0, w as i32, h as i32),
+    Some(r) => {
+      let x0 = r.x.floor().max(0.0) as i32;
+      let y0 = r.y.floor().max(0.0) as i32;
+      let x1 = (r.right().ceil() as i32).min(w as i32);
+      let y1 = (r.bottom().ceil() as i32).min(h as i32);
+      (x0, y0, x1, y1)
+    }
+  };
+  if x1 <= x0 || y1 <= y0 {
+    return;
+  }
+  for y in y0..y1 {
+    let row = y as usize * w;
+    for x in x0..x1 {
+      let p = (row + x as usize) * 4;
+      let pixel = &rgba[p..p + 4];
+      out[row + x as usize] = (0xFFu32 << 24)
+        | ((pixel[0] as u32) << 16)
+        | ((pixel[1] as u32) << 8)
+        | (pixel[2] as u32);
+    }
+  }
+}
+
 fn format_size(size: f32) -> String {
   if size.fract() == 0.0 {
     format!("{}", size as i32)
@@ -810,6 +837,42 @@ mod tests {
     for &h in &HANDLES {
       let anchor = handle_anchor(sel, h);
       assert_eq!(hit_handle(sel, anchor, HANDLE_SLOP), Some(h));
+    }
+  }
+
+  #[test]
+  fn pack_region_scopes_work_to_the_given_rect() {
+    let w = 4usize;
+    let h = 2usize;
+    let mut rgba = vec![0u8; w * h * 4];
+    for (i, px) in rgba.chunks_mut(4).enumerate() {
+      px[0] = (i * 7) as u8;
+      px[1] = (i * 11) as u8;
+      px[2] = (i * 13) as u8;
+      px[3] = 255;
+    }
+    let mut full = vec![0u32; w * h];
+    pack_region(&rgba, &mut full, w, None);
+
+    let mut scoped = vec![0u32; w * h];
+    pack_region(
+      &rgba,
+      &mut scoped,
+      w,
+      Some(GeoRect::new(0.0, 1.0, 4.0, 1.0)),
+    );
+    for y in 0..h {
+      for x in 0..w {
+        let idx = y * w + x;
+        if y == 1 {
+          assert_eq!(scoped[idx], full[idx], "row 1 must be packed");
+        } else {
+          assert_eq!(
+            scoped[idx], 0,
+            "pixels outside the region must stay untouched"
+          );
+        }
+      }
     }
   }
 }
