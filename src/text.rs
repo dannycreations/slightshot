@@ -1,6 +1,13 @@
-use std::{cell::RefCell, collections::HashMap, env, fs, path::Path, rc::Rc};
+use std::{
+  cell::RefCell,
+  collections::HashMap,
+  env, fs,
+  path::Path,
+  rc::Rc,
+  sync::{Arc, OnceLock},
+};
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, Result};
 use fontdue::{Font, FontSettings, Metrics};
 use tiny_skia::Pixmap;
 
@@ -13,36 +20,47 @@ struct Glyph {
   coverage: Vec<u8>,
 }
 
+static SYSTEM_FONT: OnceLock<Option<Arc<Font>>> = OnceLock::new();
+
+fn get_system_font() -> Option<Arc<Font>> {
+  SYSTEM_FONT
+    .get_or_init(|| {
+      let windir =
+        env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".to_string());
+      let fonts = Path::new(&windir).join("Fonts");
+      for name in FONT_FILES {
+        let path = fonts.join(name);
+        let Ok(bytes) = fs::read(&path) else {
+          continue;
+        };
+        let settings = FontSettings {
+          collection_index: 0,
+          scale: 40.0,
+          load_substitutions: false,
+        };
+        if let Ok(font) = Font::from_bytes(bytes, settings) {
+          return Some(Arc::new(font));
+        }
+      }
+      None
+    })
+    .clone()
+}
+
 #[derive(Default)]
 pub struct TextEngine {
-  font: Option<Font>,
+  font: Option<Arc<Font>>,
   cache: RefCell<HashMap<(char, u32), Rc<Glyph>>>,
 }
 
 impl TextEngine {
   pub fn load() -> Result<Self> {
-    let windir =
-      env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".to_string());
-    let fonts = Path::new(&windir).join("Fonts");
-    for name in FONT_FILES {
-      let path = fonts.join(name);
-      let Ok(bytes) = fs::read(&path) else {
-        continue;
-      };
-      let settings = FontSettings {
-        collection_index: 0,
-        scale: 40.0,
-        load_substitutions: false,
-      };
-      let font = Font::from_bytes(bytes, settings).map_err(|reason| {
-        anyhow!("{} is not a usable font: {reason}", path.display())
-      })?;
-      return Ok(Self {
-        font: Some(font),
-        cache: RefCell::new(HashMap::new()),
-      });
-    }
-    bail!("no system font found under {}", fonts.display())
+    let font = get_system_font()
+      .ok_or_else(|| anyhow!("no system font found under Windows\\Fonts"))?;
+    Ok(Self {
+      font: Some(font),
+      cache: RefCell::new(HashMap::new()),
+    })
   }
 
   pub fn draw(
@@ -130,35 +148,43 @@ impl TextEngine {
       return;
     }
 
-    let col_start = (-gx).max(0);
-    let col_end = gw.min(pw - gx);
-    let row_start = (-gy).max(0);
-    let row_end = gh.min(ph - gy);
+    let col_start = (-gx).max(0) as usize;
+    let col_end = (gw.min(pw - gx)) as usize;
+    let row_start = (-gy).max(0) as usize;
+    let row_end = (gh.min(ph - gy)) as usize;
+    let cols = col_end - col_start;
+    if cols == 0 {
+      return;
+    }
+
+    let (r, g, b) = (rgb[0] as u32, rgb[1] as u32, rgb[2] as u32);
 
     for row in row_start..row_end {
-      let py = gy + row;
-      let cov_row_offset = (row * gw) as usize;
-      let mut di = ((py * pw + (gx + col_start)) * 4) as usize;
+      let py = (gy + row as i32) as usize;
+      let px = (gx + col_start as i32) as usize;
+      let cov_offset = row * gw as usize + col_start;
+      let coverage = &glyph.coverage[cov_offset..cov_offset + cols];
+      let di = (py * pw as usize + px) * 4;
+      let dest = &mut pm[di..di + cols * 4];
 
-      for col in col_start..col_end {
-        let a = glyph.coverage[cov_row_offset + col as usize] as u32;
-        if a > 0 {
-          if a == 255 {
-            pm[di] = rgb[0];
-            pm[di + 1] = rgb[1];
-            pm[di + 2] = rgb[2];
-            pm[di + 3] = 255;
-          } else {
-            let inv = 255 - a;
-            pm[di] = ((pm[di] as u32 * inv + rgb[0] as u32 * a) / 255) as u8;
-            pm[di + 1] =
-              ((pm[di + 1] as u32 * inv + rgb[1] as u32 * a) / 255) as u8;
-            pm[di + 2] =
-              ((pm[di + 2] as u32 * inv + rgb[2] as u32 * a) / 255) as u8;
-            pm[di + 3] = (pm[di + 3] as u32 + a).min(255) as u8;
-          }
+      for (alpha_cov, chunk) in coverage.iter().zip(dest.as_chunks_mut::<4>().0)
+      {
+        let a = *alpha_cov as u32;
+        if a == 0 {
+          continue;
         }
-        di += 4;
+        if a == 255 {
+          chunk[0] = rgb[0];
+          chunk[1] = rgb[1];
+          chunk[2] = rgb[2];
+          chunk[3] = 255;
+        } else {
+          let inv = 255 - a;
+          chunk[0] = ((chunk[0] as u32 * inv + r * a) / 255) as u8;
+          chunk[1] = ((chunk[1] as u32 * inv + g * a) / 255) as u8;
+          chunk[2] = ((chunk[2] as u32 * inv + b * a) / 255) as u8;
+          chunk[3] = (chunk[3] as u32 + a).min(255) as u8;
+        }
       }
     }
   }

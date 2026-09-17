@@ -1,13 +1,6 @@
-#[inline(always)]
-pub fn swap_red_blue_opaque(word: u32) -> u32 {
-  (word & 0x0000_ff00)
-    | ((word & 0x00ff_0000) >> 16)
-    | ((word & 0x0000_00ff) << 16)
-    | 0xff00_0000
-}
-
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
+use std::slice;
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
@@ -22,12 +15,32 @@ unsafe fn swap_channels_avx2(
   );
   let alpha = _mm256_set1_epi32(0xff00_0000_u32 as i32);
 
-  let chunks32 = count / 32;
-  for _ in 0..chunks32 {
+  let chunks128 = count / 128;
+  for _ in 0..chunks128 {
+    let v0 = _mm256_loadu_si256(src_ptr as *const __m256i);
+    let v1 = _mm256_loadu_si256(src_ptr.add(32) as *const __m256i);
+    let v2 = _mm256_loadu_si256(src_ptr.add(64) as *const __m256i);
+    let v3 = _mm256_loadu_si256(src_ptr.add(96) as *const __m256i);
+
+    let r0 = _mm256_or_si256(_mm256_shuffle_epi8(v0, mask), alpha);
+    let r1 = _mm256_or_si256(_mm256_shuffle_epi8(v1, mask), alpha);
+    let r2 = _mm256_or_si256(_mm256_shuffle_epi8(v2, mask), alpha);
+    let r3 = _mm256_or_si256(_mm256_shuffle_epi8(v3, mask), alpha);
+
+    _mm256_storeu_si256(dst_ptr as *mut __m256i, r0);
+    _mm256_storeu_si256(dst_ptr.add(32) as *mut __m256i, r1);
+    _mm256_storeu_si256(dst_ptr.add(64) as *mut __m256i, r2);
+    _mm256_storeu_si256(dst_ptr.add(96) as *mut __m256i, r3);
+
+    src_ptr = src_ptr.add(128);
+    dst_ptr = dst_ptr.add(128);
+  }
+
+  let remainder32 = (count % 128) / 32;
+  for _ in 0..remainder32 {
     let v = _mm256_loadu_si256(src_ptr as *const __m256i);
-    let shuffled = _mm256_shuffle_epi8(v, mask);
-    let result = _mm256_or_si256(shuffled, alpha);
-    _mm256_storeu_si256(dst_ptr as *mut __m256i, result);
+    let r = _mm256_or_si256(_mm256_shuffle_epi8(v, mask), alpha);
+    _mm256_storeu_si256(dst_ptr as *mut __m256i, r);
     src_ptr = src_ptr.add(32);
     dst_ptr = dst_ptr.add(32);
   }
@@ -45,12 +58,32 @@ unsafe fn swap_channels_ssse3(
   );
   let alpha = _mm_set1_epi32(0xff00_0000_u32 as i32);
 
-  let chunks16 = count / 16;
-  for _ in 0..chunks16 {
+  let chunks64 = count / 64;
+  for _ in 0..chunks64 {
+    let v0 = _mm_loadu_si128(src_ptr as *const __m128i);
+    let v1 = _mm_loadu_si128(src_ptr.add(16) as *const __m128i);
+    let v2 = _mm_loadu_si128(src_ptr.add(32) as *const __m128i);
+    let v3 = _mm_loadu_si128(src_ptr.add(48) as *const __m128i);
+
+    let r0 = _mm_or_si128(_mm_shuffle_epi8(v0, mask), alpha);
+    let r1 = _mm_or_si128(_mm_shuffle_epi8(v1, mask), alpha);
+    let r2 = _mm_or_si128(_mm_shuffle_epi8(v2, mask), alpha);
+    let r3 = _mm_or_si128(_mm_shuffle_epi8(v3, mask), alpha);
+
+    _mm_storeu_si128(dst_ptr as *mut __m128i, r0);
+    _mm_storeu_si128(dst_ptr.add(16) as *mut __m128i, r1);
+    _mm_storeu_si128(dst_ptr.add(32) as *mut __m128i, r2);
+    _mm_storeu_si128(dst_ptr.add(48) as *mut __m128i, r3);
+
+    src_ptr = src_ptr.add(64);
+    dst_ptr = dst_ptr.add(64);
+  }
+
+  let remainder16 = (count % 64) / 16;
+  for _ in 0..remainder16 {
     let v = _mm_loadu_si128(src_ptr as *const __m128i);
-    let shuffled = _mm_shuffle_epi8(v, mask);
-    let result = _mm_or_si128(shuffled, alpha);
-    _mm_storeu_si128(dst_ptr as *mut __m128i, result);
+    let r = _mm_or_si128(_mm_shuffle_epi8(v, mask), alpha);
+    _mm_storeu_si128(dst_ptr as *mut __m128i, r);
     src_ptr = src_ptr.add(16);
     dst_ptr = dst_ptr.add(16);
   }
@@ -94,61 +127,17 @@ pub fn swap_channels(src: &[u8], dst: &mut [u8]) {
   }
 }
 
+#[inline(always)]
 pub fn swap_channels_to_words(src: &[u8], dst: &mut [u32]) {
-  let total_bytes = src.len().min(dst.len() * 4) & !3;
-  let mut processed = 0;
-
-  #[cfg(target_arch = "x86_64")]
-  {
-    if is_x86_feature_detected!("avx2") {
-      let simd_bytes = total_bytes & !31;
-      if simd_bytes > 0 {
-        unsafe {
-          swap_channels_avx2(
-            src.as_ptr(),
-            dst.as_mut_ptr() as *mut u8,
-            simd_bytes,
-          );
-        }
-        processed = simd_bytes;
-      }
-    } else if is_x86_feature_detected!("ssse3") {
-      let simd_bytes = total_bytes & !15;
-      if simd_bytes > 0 {
-        unsafe {
-          swap_channels_ssse3(
-            src.as_ptr(),
-            dst.as_mut_ptr() as *mut u8,
-            simd_bytes,
-          );
-        }
-        processed = simd_bytes;
-      }
-    }
-  }
-
-  let offset_words = processed / 4;
-  let total_words = total_bytes / 4;
-  for (word, chunk) in dst[offset_words..total_words]
-    .iter_mut()
-    .zip(src[processed..total_bytes].as_chunks::<4>().0)
-  {
-    *word = swap_red_blue_opaque(u32::from_le_bytes(*chunk));
-  }
+  let dst_bytes = unsafe {
+    slice::from_raw_parts_mut(dst.as_mut_ptr() as *mut u8, dst.len() * 4)
+  };
+  swap_channels(src, dst_bytes);
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
-
-  #[test]
-  fn swap_is_its_own_inverse() {
-    let word = u32::from_le_bytes([10, 20, 30, 0]);
-    let swapped = swap_red_blue_opaque(word);
-    assert_eq!(swapped.to_le_bytes(), [30, 20, 10, 255]);
-    let back = swap_red_blue_opaque(swapped);
-    assert_eq!(back.to_le_bytes(), [10, 20, 30, 255]);
-  }
 
   #[test]
   fn swap_channels_matches_word_level_swap() {

@@ -81,8 +81,8 @@ struct Session {
   window: Arc<Window>,
   canvas: Pixmap,
   backdrop: Pixmap,
-  inked_backdrop: Pixmap,
-  inked_canvas: Pixmap,
+  inked_backdrop: Option<Pixmap>,
+  inked_canvas: Option<Pixmap>,
   frame: Pixmap,
   surface: Surface,
   bounds: Rect,
@@ -305,8 +305,6 @@ impl Session {
 
     let frame = Pixmap::new(canvas.width(), canvas.height())
       .expect("frame allocation failed");
-    let inked_backdrop = backdrop.clone();
-    let inked_canvas = canvas.clone();
 
     let mut sizes = [0.0f32; 7];
     for tool in Tool::all() {
@@ -317,8 +315,8 @@ impl Session {
       window,
       canvas,
       backdrop,
-      inked_backdrop,
-      inked_canvas,
+      inked_backdrop: None,
+      inked_canvas: None,
       frame,
       surface,
       bounds,
@@ -349,6 +347,15 @@ impl Session {
     }
   }
 
+  fn ensure_ink_buffers(&mut self) {
+    if self.inked_backdrop.is_none() {
+      self.inked_backdrop = Some(self.backdrop.clone());
+    }
+    if self.inked_canvas.is_none() {
+      self.inked_canvas = Some(self.canvas.clone());
+    }
+  }
+
   fn render(&mut self) {
     if let Some(until) = self.hint_until {
       if Instant::now() >= until {
@@ -365,7 +372,8 @@ impl Session {
       self.mode.shows_chrome(),
     );
     let chrome = &self.chrome;
-    let inked_backdrop = &self.inked_backdrop;
+    let inked_backdrop = self.inked_backdrop.as_ref().unwrap_or(&self.backdrop);
+    let inked_canvas = self.inked_canvas.as_ref().unwrap_or(&self.canvas);
     let draft = self.mode.draft();
     let typing = Self::typing(&self.mode, self.size(Tool::Label));
     let text = &self.engine;
@@ -373,7 +381,7 @@ impl Session {
     let frame = &mut self.frame;
     let scene = Scene {
       inked_backdrop,
-      inked_canvas: &self.inked_canvas,
+      inked_canvas,
       bounds: self.bounds,
       selection: self.selection,
       draft,
@@ -580,36 +588,26 @@ impl Session {
   }
 
   fn ink_shape(&mut self, shape: &Shape) {
-    render::ink(
-      &mut self.inked_backdrop,
-      shape,
-      Point::default(),
-      &self.engine,
-    );
-    render::ink(
-      &mut self.inked_canvas,
-      shape,
-      Point::default(),
-      &self.engine,
-    );
+    self.ensure_ink_buffers();
+    let bd = self.inked_backdrop.as_mut().unwrap();
+    let cv = self.inked_canvas.as_mut().unwrap();
+    render::ink(bd, shape, Point::default(), &self.engine);
+    render::ink(cv, shape, Point::default(), &self.engine);
   }
 
   fn rebuild_ink(&mut self) {
-    self.inked_backdrop = self.backdrop.clone();
-    self.inked_canvas = self.canvas.clone();
-    for shape in self.history.shapes() {
-      render::ink(
-        &mut self.inked_backdrop,
-        shape,
-        Point::default(),
-        &self.engine,
-      );
-      render::ink(
-        &mut self.inked_canvas,
-        shape,
-        Point::default(),
-        &self.engine,
-      );
+    if self.history.shapes().is_empty() {
+      self.inked_backdrop = None;
+      self.inked_canvas = None;
+    } else {
+      let mut bd = self.backdrop.clone();
+      let mut cv = self.canvas.clone();
+      for shape in self.history.shapes() {
+        render::ink(&mut bd, shape, Point::default(), &self.engine);
+        render::ink(&mut cv, shape, Point::default(), &self.engine);
+      }
+      self.inked_backdrop = Some(bd);
+      self.inked_canvas = Some(cv);
     }
   }
 
@@ -696,7 +694,11 @@ fn format_size(size: f32) -> String {
 
 pub fn extend_draft(anchor: Point, draft: &mut Shape, p: Point) {
   match draft {
-    Shape::Stroke { points, .. } => points.push(p),
+    Shape::Stroke { points, .. } => {
+      if points.last() != Some(&p) {
+        points.push(p);
+      }
+    }
     Shape::Line { to, .. } => *to = p,
     Shape::Outline { rect, .. } => *rect = Rect::spanning(anchor, p),
     Shape::Caption { at, .. } => *at = p,

@@ -97,7 +97,8 @@ fn write_png<W: Write>(shot: &Shot, writer: W) -> Result<()> {
 }
 
 fn png_bytes(shot: &Shot) -> Result<Vec<u8>> {
-  let mut cursor = Cursor::new(Vec::new());
+  let capacity = (shot.rgba.len() / 4).max(4096);
+  let mut cursor = Cursor::new(Vec::with_capacity(capacity));
   write_png(shot, &mut cursor)?;
   Ok(cursor.into_inner())
 }
@@ -105,7 +106,7 @@ fn png_bytes(shot: &Shot) -> Result<Vec<u8>> {
 fn encode_png(shot: &Shot, path: &Path) -> Result<()> {
   let file = fs::File::create(path)
     .with_context(|| format!("cannot create {}", path.display()))?;
-  let writer = BufWriter::new(file);
+  let writer = BufWriter::with_capacity(64 * 1024, file);
   write_png(shot, writer)
     .with_context(|| format!("failed writing png to {}", path.display()))
 }

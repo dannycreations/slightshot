@@ -37,25 +37,6 @@ pub fn polyline(
   rgb: [u8; 3],
   width: f32,
   alpha: u8,
-) {
-  let Some(path) = smooth_path(pts) else {
-    return;
-  };
-  pm.stroke_path(
-    &path,
-    &paint(rgb[0], rgb[1], rgb[2], alpha),
-    &stroke(width),
-    Transform::identity(),
-    None,
-  );
-}
-
-pub fn polyline_offset(
-  pm: &mut Pixmap,
-  pts: &[Point],
-  rgb: [u8; 3],
-  width: f32,
-  alpha: u8,
   offset: Point,
 ) {
   let Some(path) = smooth_path(pts) else {
@@ -75,9 +56,6 @@ pub fn polyline_offset(
   );
 }
 
-const SMOOTH_MAX_STEPS: usize = 16;
-const SMOOTH_STEP_LENGTH: f32 = 6.0;
-
 fn smooth_path(points: &[Point]) -> Option<Path> {
   if points.len() < 2 {
     return None;
@@ -95,27 +73,13 @@ fn smooth_path(points: &[Point]) -> Option<Path> {
     let p2 = points[i + 1];
     let p3 = points[(i + 2).min(len - 1)];
 
-    let dist = p1.distance(p2);
-    let steps =
-      ((dist / SMOOTH_STEP_LENGTH).ceil() as usize).clamp(1, SMOOTH_MAX_STEPS);
-    let inv_steps = 1.0 / steps as f32;
+    // Exact Catmull-Rom to cubic Bézier conversion
+    let c1x = p1.x + (p2.x - p0.x) * (1.0 / 6.0);
+    let c1y = p1.y + (p2.y - p0.y) * (1.0 / 6.0);
+    let c2x = p2.x - (p3.x - p1.x) * (1.0 / 6.0);
+    let c2y = p2.y - (p3.y - p1.y) * (1.0 / 6.0);
 
-    // Horner's form coefficients for Catmull-Rom spline
-    let ax = 0.5 * (-p0.x + 3.0 * p1.x - 3.0 * p2.x + p3.x);
-    let ay = 0.5 * (-p0.y + 3.0 * p1.y - 3.0 * p2.y + p3.y);
-    let bx = 0.5 * (2.0 * p0.x - 5.0 * p1.x + 4.0 * p2.x - p3.x);
-    let by = 0.5 * (2.0 * p0.y - 5.0 * p1.y + 4.0 * p2.y - p3.y);
-    let cx = 0.5 * (-p0.x + p2.x);
-    let cy = 0.5 * (-p0.y + p2.y);
-    let dx = p1.x;
-    let dy = p1.y;
-
-    for step in 1..=steps {
-      let t = step as f32 * inv_steps;
-      let x = ((ax * t + bx) * t + cx) * t + dx;
-      let y = ((ay * t + by) * t + cy) * t + dy;
-      builder.line_to(x, y);
-    }
+    builder.cubic_to(c1x, c1y, c2x, c2y, p2.x, p2.y);
   }
   builder.finish()
 }
@@ -159,12 +123,18 @@ pub fn arrow_head(
   if length <= f32::EPSILON {
     return;
   }
-  let (ux, uy) = (dx / length, dy / length);
+  let inv_len = 1.0 / length;
+  let (ux, uy) = (dx * inv_len, dy * inv_len);
   let spread = size * 0.45;
-  let base_x = head.x - ux * size - uy * spread;
-  let base_y = head.y - uy * size + ux * spread;
-  let tip_x = head.x - ux * size + uy * spread;
-  let tip_y = head.y - uy * size - ux * spread;
+  let ux_size = ux * size;
+  let uy_size = uy * size;
+  let ux_spread = ux * spread;
+  let uy_spread = uy * spread;
+
+  let base_x = head.x - ux_size - uy_spread;
+  let base_y = head.y - uy_size + ux_spread;
+  let tip_x = head.x - ux_size + uy_spread;
+  let tip_y = head.y - uy_size - ux_spread;
 
   let mut builder = PathBuilder::new();
   builder.move_to(head.x, head.y);
@@ -222,15 +192,12 @@ pub fn dashed_rect(pm: &mut Pixmap, rect: GeoRect, rgb: [u8; 3], width: f32) {
   let Some(path) = closed_path(&corners(rect)) else {
     return;
   };
+  static DASH: OnceLock<StrokeDash> = OnceLock::new();
+  let dash = DASH.get_or_init(|| StrokeDash::new(vec![3.0, 3.0], 0.0).unwrap());
   let mut stroke = stroke(width);
   stroke.line_cap = LineCap::Butt;
   stroke.line_join = LineJoin::Miter;
-  static DASH: OnceLock<StrokeDash> = OnceLock::new();
-  stroke.dash = Some(
-    DASH
-      .get_or_init(|| StrokeDash::new(vec![3.0, 3.0], 0.0).unwrap())
-      .clone(),
-  );
+  stroke.dash = Some(dash.clone());
   pm.stroke_path(
     &path,
     &paint(rgb[0], rgb[1], rgb[2], 255),
@@ -241,7 +208,7 @@ pub fn dashed_rect(pm: &mut Pixmap, rect: GeoRect, rgb: [u8; 3], width: f32) {
 }
 
 fn round_rect_path(r: Rect, radius: f32) -> Option<Path> {
-  let rr = radius.min(r.width() / 2.0).min(r.height() / 2.0);
+  let rr = radius.min(r.width() * 0.5).min(r.height() * 0.5);
   let mut path = PathBuilder::new();
   path.move_to(r.x() + rr, r.y());
   path.line_to(r.right() - rr, r.y());
@@ -325,8 +292,8 @@ impl Icon {
     color: [u8; 3],
   ) {
     let tinted = tinted_sprite(self, color, box_size);
-    let x = (center.x - box_size / 2.0).round() as i32;
-    let y = (center.y - box_size / 2.0).round() as i32;
+    let x = (center.x - box_size * 0.5).round() as i32;
+    let y = (center.y - box_size * 0.5).round() as i32;
     pm.draw_pixmap(
       x,
       y,
@@ -435,6 +402,7 @@ mod tests {
       [255, 0, 0],
       2.0,
       255,
+      Point::new(0.0, 0.0),
     );
     let painted = pm
       .data()

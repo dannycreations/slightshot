@@ -108,7 +108,8 @@ pub fn grab() -> Result<ScreenShot> {
     .context("BitBlt of the desktop failed")?;
 
     let raw = slice::from_raw_parts(bits as *const u8, pixels);
-    let mut rgba = vec![0u8; pixels];
+    let mut rgba = Vec::with_capacity(pixels);
+    rgba.extend(std::iter::repeat_n(0, pixels));
     swap_channels(raw, &mut rgba);
 
     drop(bmp_guard);

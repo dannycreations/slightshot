@@ -1,3 +1,5 @@
+use std::fmt::Write;
+
 use tiny_skia::Pixmap;
 
 use crate::{
@@ -94,50 +96,63 @@ pub fn build(
 ) {
   let ready = deliverable_region(selection).is_some();
 
-  chrome.tools.clear();
-  chrome.tools.extend(
-    [
-      (Tool::Pen, draw::Icon::Pen),
-      (Tool::Line, draw::Icon::Line),
-      (Tool::Arrow, draw::Icon::Arrow),
-      (Tool::Box, draw::Icon::Outline),
-      (Tool::Marker, draw::Icon::Marker),
-      (Tool::Label, draw::Icon::Letter),
-    ]
-    .iter()
-    .map(|&(item, icon)| button(Command::Tool(item), icon, true, item == tool)),
-  );
-  chrome.tools.push(button(
-    Command::NextColor,
-    draw::Icon::Letter,
-    true,
-    false,
-  ));
-  chrome.tools.push(button(
-    Command::Undo,
-    draw::Icon::Undo,
-    history.can_undo(),
-    false,
-  ));
+  if chrome.tools.len() != 8 {
+    chrome.tools = vec![
+      button(Command::Tool(Tool::Pen), draw::Icon::Pen, true, false),
+      button(Command::Tool(Tool::Line), draw::Icon::Line, true, false),
+      button(Command::Tool(Tool::Arrow), draw::Icon::Arrow, true, false),
+      button(Command::Tool(Tool::Box), draw::Icon::Outline, true, false),
+      button(Command::Tool(Tool::Marker), draw::Icon::Marker, true, false),
+      button(Command::Tool(Tool::Label), draw::Icon::Letter, true, false),
+      button(Command::NextColor, draw::Icon::Letter, true, false),
+      button(Command::Undo, draw::Icon::Undo, false, false),
+    ];
+  }
+  if chrome.actions.len() != 4 {
+    chrome.actions = vec![
+      button(
+        Command::Deliver(Deliverable::Upload),
+        draw::Icon::Upload,
+        false,
+        false,
+      ),
+      button(
+        Command::Deliver(Deliverable::Copy),
+        draw::Icon::CopyImage,
+        false,
+        false,
+      ),
+      button(
+        Command::Deliver(Deliverable::Save),
+        draw::Icon::Save,
+        false,
+        false,
+      ),
+      button(Command::Close, draw::Icon::Close, true, false),
+    ];
+  }
 
-  chrome.actions.clear();
-  chrome.actions.extend(
-    [
-      (Command::Deliver(Deliverable::Upload), draw::Icon::Upload),
-      (Command::Deliver(Deliverable::Copy), draw::Icon::CopyImage),
-      (Command::Deliver(Deliverable::Save), draw::Icon::Save),
-      (Command::Close, draw::Icon::Close),
-    ]
-    .iter()
-    .map(|&(command, icon)| {
-      let enabled = ready || command == Command::Close;
-      button(command, icon, enabled, false)
-    }),
-  );
+  for b in &mut chrome.tools[..6] {
+    if let Command::Tool(t) = b.command {
+      b.active = t == tool;
+    }
+  }
+  chrome.tools[7].enabled = history.can_undo();
 
-  if show_chrome {
+  for b in &mut chrome.actions[..3] {
+    b.enabled = ready;
+  }
+
+  if show_chrome && selection.is_some() {
     layout_panel(&mut chrome.tools, selection, bounds, Axis::Vertical);
     layout_panel(&mut chrome.actions, selection, bounds, Axis::Horizontal);
+  } else {
+    for b in &mut chrome.tools {
+      b.area = Rect::default();
+    }
+    for b in &mut chrome.actions {
+      b.area = Rect::default();
+    }
   }
 }
 
@@ -270,6 +285,7 @@ pub fn paint(pm: &mut Pixmap, scene: &Scene) {
         [255, 255, 255],
         1.5,
         255,
+        Point::new(0.0, 0.0),
       );
     }
     draw_panels(pm, scene);
@@ -406,7 +422,7 @@ pub(crate) fn ink(
       marker,
     } => {
       let alpha = if *marker { MARKER_ALPHA } else { 255 };
-      draw::polyline_offset(pm, points, *color, *width, alpha, origin);
+      draw::polyline(pm, points, *color, *width, alpha, origin);
     }
     Shape::Line {
       from,
@@ -427,10 +443,24 @@ pub(crate) fn ink(
         } else {
           end
         };
-        draw::polyline(pm, &[start, base], *color, *width, 255);
+        draw::polyline(
+          pm,
+          &[start, base],
+          *color,
+          *width,
+          255,
+          Point::new(0.0, 0.0),
+        );
         draw::arrow_head(pm, start, end, size, *color, 255);
       } else {
-        draw::polyline(pm, &[start, end], *color, *width, 255);
+        draw::polyline(
+          pm,
+          &[start, end],
+          *color,
+          *width,
+          255,
+          Point::new(0.0, 0.0),
+        );
       }
     }
     Shape::Outline { rect, color, width } => {
@@ -463,7 +493,6 @@ fn draw_handles(pm: &mut Pixmap, sel: Rect) {
 
 fn draw_badge(pm: &mut Pixmap, sel: Rect, bounds: Rect, engine: &TextEngine) {
   let mut label = String::with_capacity(16);
-  use std::fmt::Write;
   let _ = write!(label, "{}x{}", sel.w.round() as i64, sel.h.round() as i64);
 
   let text_width = engine.width(&label, BADGE_TEXT);
