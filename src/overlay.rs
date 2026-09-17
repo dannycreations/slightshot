@@ -29,13 +29,14 @@ use winit::{
 };
 
 use crate::{
-  actions::{self, Deliverable, Shot},
+  action::{self, Deliverable, Shot},
   annotate::{
     active_color, History, Shape, Tool, MAX_SIZE, MIN_SIZE, PALETTE, SIZE_STEP,
   },
   capture,
   geom::{hit_handle, resized, Handle, Point, Rect},
   hotkey::Trigger,
+  pixel::swap_channels_to_words,
   render::{self, Chrome, Hotspot, Scene, HANDLE_SLOP},
   text::TextEngine,
 };
@@ -80,6 +81,8 @@ struct Session {
   window: Arc<Window>,
   canvas: Pixmap,
   backdrop: Pixmap,
+  inked_backdrop: Pixmap,
+  inked_canvas: Pixmap,
   frame: Pixmap,
   surface: Surface,
   bounds: Rect,
@@ -222,7 +225,7 @@ impl App {
     let Outcome::Deliver { deliverable, shot } = outcome else {
       return;
     };
-    thread::spawn(move || match actions::execute(deliverable, &shot) {
+    thread::spawn(move || match action::execute(deliverable, &shot) {
       Ok(summary) => println!("slightshot: {summary}"),
       Err(error) => eprintln!("slightshot: {error:#}"),
     });
@@ -285,6 +288,8 @@ impl Session {
 
     let frame = Pixmap::new(canvas.width(), canvas.height())
       .expect("frame allocation failed");
+    let inked_backdrop = backdrop.clone();
+    let inked_canvas = canvas.clone();
 
     let mut sizes = [0.0f32; 7];
     for tool in Tool::all() {
@@ -295,6 +300,8 @@ impl Session {
       window,
       canvas,
       backdrop,
+      inked_backdrop,
+      inked_canvas,
       frame,
       surface,
       bounds,
@@ -335,19 +342,17 @@ impl Session {
       self.mode.shows_chrome(),
     );
     let chrome = &self.chrome;
-    let backdrop = &self.backdrop;
-    let shapes = self.history.shapes();
+    let inked_backdrop = &self.inked_backdrop;
     let draft = self.mode.draft();
     let typing = Self::typing(&self.mode, self.size(Tool::Label));
     let text = &self.engine;
 
     let frame = &mut self.frame;
     let scene = Scene {
-      backdrop,
-      canvas: &self.canvas,
+      inked_backdrop,
+      inked_canvas: &self.inked_canvas,
       bounds: self.bounds,
       selection: self.selection,
-      shapes,
       draft,
       typing,
       palette_index: self.palette_index,
@@ -368,7 +373,7 @@ impl Session {
     if buffer.len() != (self.frame.width() * self.frame.height()) as usize {
       return;
     }
-    pack_rgba(self.frame.data(), &mut buffer);
+    swap_channels_to_words(self.frame.data(), &mut buffer);
     let _ = buffer.present();
   }
 
@@ -525,6 +530,7 @@ impl Session {
       }
       render::Command::Undo => {
         if self.history.undo() {
+          self.rebuild_ink();
           self.window.request_redraw();
         }
         None
@@ -541,12 +547,47 @@ impl Session {
     Some(Outcome::Deliver { deliverable, shot })
   }
 
+  fn ink_shape(&mut self, shape: &Shape) {
+    render::ink(
+      &mut self.inked_backdrop,
+      shape,
+      Point::default(),
+      &self.engine,
+    );
+    render::ink(
+      &mut self.inked_canvas,
+      shape,
+      Point::default(),
+      &self.engine,
+    );
+  }
+
+  fn rebuild_ink(&mut self) {
+    self.inked_backdrop = self.backdrop.clone();
+    self.inked_canvas = self.canvas.clone();
+    for shape in self.history.shapes() {
+      render::ink(
+        &mut self.inked_backdrop,
+        shape,
+        Point::default(),
+        &self.engine,
+      );
+      render::ink(
+        &mut self.inked_canvas,
+        shape,
+        Point::default(),
+        &self.engine,
+      );
+    }
+  }
+
   fn mouse_up(&mut self) {
     match std::mem::replace(&mut self.mode, Mode::Idle) {
       Mode::Rubber(_) => {
         self.selection = render::deliverable_region(self.selection);
       }
       Mode::Draw(draft, _) if draft.is_complete() => {
+        self.ink_shape(&draft);
         self.history.push(draft);
       }
       Mode::Type(buffer, anchor) => {
@@ -580,6 +621,7 @@ impl Session {
         size: self.size(Tool::Label),
       };
       if text.is_complete() {
+        self.ink_shape(&text);
         self.history.push(text);
       }
       self.mode = Mode::Idle;
@@ -624,16 +666,6 @@ impl Session {
         thread::sleep(HINT_DURATION);
         window.request_redraw();
       });
-  }
-}
-
-fn pack_rgba(rgba: &[u8], out: &mut [u32]) {
-  for (chunk, pixel) in rgba.as_chunks::<4>().0.iter().zip(out.iter_mut()) {
-    let w = u32::from_le_bytes(*chunk);
-    *pixel = 0xff00_0000
-      | ((w & 0x0000_00ff) << 16)
-      | (w & 0x0000_ff00)
-      | ((w & 0x00ff_0000) >> 16);
   }
 }
 
@@ -727,10 +759,10 @@ mod tests {
   }
 
   #[test]
-  fn pack_rgba_converts_straight_rgba_rows_to_argb_words() {
+  fn converts_straight_rgba_rows_to_argb_words() {
     let rgba = [10u8, 20, 30, 0, 40, 50, 60, 99];
     let mut out = [0u32; 2];
-    pack_rgba(&rgba, &mut out);
+    swap_channels_to_words(&rgba, &mut out);
     assert_eq!(out[0], (0xFFu32 << 24) | (10 << 16) | (20 << 8) | 30);
     assert_eq!(out[1], (0xFFu32 << 24) | (40 << 16) | (50 << 8) | 60);
   }

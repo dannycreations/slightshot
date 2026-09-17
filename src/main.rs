@@ -1,10 +1,11 @@
-mod actions;
+mod action;
 mod annotate;
 mod capture;
 mod draw;
 mod geom;
 mod hotkey;
 mod overlay;
+mod pixel;
 mod render;
 mod text;
 mod upload;

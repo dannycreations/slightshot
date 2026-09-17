@@ -1,7 +1,7 @@
 use tiny_skia::Pixmap;
 
 use crate::{
-  actions::{Deliverable, Shot},
+  action::{Deliverable, Shot},
   annotate::{active_color, History, Shape, Tool, MARKER_ALPHA},
   draw,
   geom::{handle_anchor, Point, Rect, HANDLES},
@@ -221,11 +221,10 @@ fn layout_panel(
 }
 
 pub struct Scene<'a> {
-  pub backdrop: &'a Pixmap,
-  pub canvas: &'a Pixmap,
+  pub inked_backdrop: &'a Pixmap,
+  pub inked_canvas: &'a Pixmap,
   pub bounds: Rect,
   pub selection: Option<Rect>,
-  pub shapes: &'a [Shape],
   pub draft: Option<&'a Shape>,
   pub typing: Option<(Point, &'a str, f32)>,
   pub palette_index: usize,
@@ -236,7 +235,7 @@ pub struct Scene<'a> {
 }
 
 pub fn paint(pm: &mut Pixmap, scene: &Scene) {
-  pm.data_mut().copy_from_slice(scene.backdrop.data());
+  pm.data_mut().copy_from_slice(scene.inked_backdrop.data());
   if let Some(sel) = scene.selection {
     let (x0, y0, width, height) =
       region_pixels(sel, pm.width() as i32, pm.height() as i32);
@@ -249,7 +248,7 @@ pub fn paint(pm: &mut Pixmap, scene: &Scene) {
       px_w,
       x0 as usize,
       y0 as usize,
-      scene.canvas.data(),
+      scene.inked_canvas.data(),
       px_w,
       x0 as usize,
       y0 as usize,
@@ -257,7 +256,7 @@ pub fn paint(pm: &mut Pixmap, scene: &Scene) {
       height as usize,
     );
   }
-  draw_annotations(pm, scene);
+  draw_live(pm, scene);
   if let Some(sel) = scene.selection {
     draw_border(pm, sel);
     draw_handles(pm, sel);
@@ -308,17 +307,14 @@ fn blit(
   }
 }
 
-fn draw_annotations(pm: &mut Pixmap, scene: &Scene) {
+fn draw_live(pm: &mut Pixmap, scene: &Scene) {
   let origin = Point::new(0.0, 0.0);
-  for shape in scene.shapes {
-    draw_shape(pm, shape, origin, scene.text);
-  }
   if let Some(draft) = scene.draft {
-    draw_shape(pm, draft, origin, scene.text);
+    ink(pm, draft, origin, scene.text);
   }
   if let Some((at, buffer, size)) = scene.typing {
-    let ink = active_color(scene.palette_index);
-    scene.text.draw(pm, buffer, at.x, at.y, size, ink);
+    let color = active_color(scene.palette_index);
+    scene.text.draw(pm, buffer, at.x, at.y, size, color);
   }
 }
 
@@ -362,7 +358,7 @@ pub fn flatten(
   );
   let origin = Point::new(x0 as f32, y0 as f32);
   for shape in shapes {
-    draw_shape(&mut layer, shape, origin, text);
+    ink(&mut layer, shape, origin, text);
   }
   Shot {
     width: width as u32,
@@ -371,7 +367,7 @@ pub fn flatten(
   }
 }
 
-fn draw_shape(
+pub(crate) fn ink(
   pm: &mut Pixmap,
   shape: &Shape,
   origin: Point,
@@ -827,11 +823,10 @@ mod tests {
     let mut pm = backdrop.clone();
 
     let scene = Scene {
-      backdrop: &backdrop,
-      canvas: &canvas,
+      inked_backdrop: &backdrop,
+      inked_canvas: &canvas,
       bounds,
       selection,
-      shapes: history.shapes(),
       draft: Some(&draft),
       typing: None,
       palette_index: 0,

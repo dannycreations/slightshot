@@ -47,9 +47,8 @@ pub fn polyline(
   );
 }
 
-// Samples per span. A fast stroke is captured with few, far-apart points;
-// subdividing each span keeps the stroked curve smooth instead of polygonal.
-const SMOOTH_STEPS: usize = 16;
+const SMOOTH_MAX_STEPS: usize = 16;
+const SMOOTH_STEP_LENGTH: f32 = 6.0;
 
 fn smooth_path(points: &[Point]) -> Option<Path> {
   if points.len() < 2 {
@@ -66,8 +65,10 @@ fn smooth_path(points: &[Point]) -> Option<Path> {
     let curr = points[i];
     let next = points[i + 1];
     let after = points[(i + 2).min(points.len() - 1)];
-    for step in 1..=SMOOTH_STEPS {
-      let t = step as f32 / SMOOTH_STEPS as f32;
+    let steps = ((curr.distance(next) / SMOOTH_STEP_LENGTH).ceil() as usize)
+      .clamp(1, SMOOTH_MAX_STEPS);
+    for step in 1..=steps {
+      let t = step as f32 / steps as f32;
       builder.line_to(
         catmull_rom(prev.x, curr.x, next.x, after.x, t),
         catmull_rom(prev.y, curr.y, next.y, after.y, t),

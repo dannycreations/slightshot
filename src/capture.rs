@@ -15,25 +15,11 @@ use windows::Win32::{
   },
 };
 
+use crate::pixel::swap_channels;
+
 pub struct ScreenShot {
   pub pixmap: Pixmap,
   pub origin: (i32, i32),
-}
-
-fn bgra_to_rgba(src: &[u8], dst: &mut [u8]) {
-  for (out, bgra) in dst
-    .as_chunks_mut::<4>()
-    .0
-    .iter_mut()
-    .zip(src.as_chunks::<4>().0)
-  {
-    let w = u32::from_le_bytes(*bgra);
-    let rgba = (w & 0x0000_ff00)
-      | ((w & 0x00ff_0000) >> 16)
-      | ((w & 0x0000_00ff) << 16)
-      | 0xff00_0000;
-    *out = rgba.to_le_bytes();
-  }
 }
 
 struct DcGuard {
@@ -123,7 +109,7 @@ pub fn grab() -> Result<ScreenShot> {
 
     let raw = slice::from_raw_parts(bits as *const u8, pixels);
     let mut rgba = vec![0_u8; pixels];
-    bgra_to_rgba(raw, &mut rgba);
+    swap_channels(raw, &mut rgba);
 
     drop(bmp_guard);
     drop(dc_guard);
@@ -144,13 +130,13 @@ mod tests {
   use super::*;
 
   #[test]
-  fn bgra_to_rgba_swaps_channels_and_opaques_alpha() {
+  fn swaps_channels_and_opaques_alpha() {
     let src = [
       10, 20, 30, 0, // BGRA -> RGBA 30,20,10,255
       40, 50, 60, 99, // -> 60,50,40,255
     ];
     let mut dst = vec![0u8; 8];
-    bgra_to_rgba(&src, &mut dst);
+    swap_channels(&src, &mut dst);
     assert_eq!(dst, [30, 20, 10, 255, 60, 50, 40, 255]);
   }
 }
