@@ -32,6 +32,7 @@ use crate::{
   action::{self, Deliverable, Shot},
   annotate::{
     active_color, History, Shape, Tool, MAX_SIZE, MIN_SIZE, PALETTE, SIZE_STEP,
+    TOOLS,
   },
   capture,
   geom::{hit_handle, resized, Handle, Point, Rect},
@@ -63,6 +64,7 @@ enum Mode {
 }
 
 impl Mode {
+  #[inline(always)]
   fn draft(&self) -> Option<&Shape> {
     match self {
       Mode::Draw(shape, _) => Some(shape),
@@ -70,6 +72,7 @@ impl Mode {
     }
   }
 
+  #[inline(always)]
   fn shows_chrome(&self) -> bool {
     matches!(self, Mode::Idle | Mode::Draw(_, _) | Mode::Type(_, _))
   }
@@ -111,19 +114,15 @@ impl ApplicationHandler<Trigger> for App {
   fn resumed(&mut self, _event_loop: &ActiveEventLoop) {}
 
   fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-    if let Some(session) = self.session.as_mut() {
-      if let Some(until) = session.hint_until {
-        let now = Instant::now();
-        if now >= until {
-          session.hint = None;
-          session.hint_until = None;
-          session.window.request_redraw();
-        } else {
-          event_loop.set_control_flow(ControlFlow::WaitUntil(until));
-        }
-      } else {
-        event_loop.set_control_flow(ControlFlow::Wait);
-      }
+    let Some(session) = self.session.as_mut() else {
+      return;
+    };
+    if session.expire_hint() {
+      session.window.request_redraw();
+    } else if let Some(until) = session.hint_until {
+      event_loop.set_control_flow(ControlFlow::WaitUntil(until));
+    } else {
+      event_loop.set_control_flow(ControlFlow::Wait);
     }
   }
 
@@ -226,7 +225,9 @@ impl ApplicationHandler<Trigger> for App {
           match Session::create(event_loop) {
             Ok(session) => self.session = Some(session),
             Err(error) => {
-              eprintln!("slightshot: could not lock the screen for selection: {error:#}")
+              eprintln!(
+                "slightshot: could not lock the screen for selection: {error:#}"
+              )
             }
           }
         }
@@ -306,10 +307,7 @@ impl Session {
     let frame = Pixmap::new(canvas.width(), canvas.height())
       .expect("frame allocation failed");
 
-    let mut sizes = [0.0f32; 7];
-    for tool in Tool::all() {
-      sizes[*tool as usize] = tool.default_size();
-    }
+    let sizes = TOOLS.map(Tool::default_size);
 
     let mut session = Self {
       window,
@@ -340,10 +338,23 @@ impl Session {
     Ok(session)
   }
 
+  #[inline]
   fn update_cursor(&mut self, icon: CursorIcon) {
     if self.current_cursor != icon {
       self.current_cursor = icon;
       self.window.set_cursor(icon);
+    }
+  }
+
+  /// Clears the hint once its timer elapses. Returns true if it just cleared.
+  fn expire_hint(&mut self) -> bool {
+    match self.hint_until {
+      Some(until) if Instant::now() >= until => {
+        self.hint = None;
+        self.hint_until = None;
+        true
+      }
+      _ => false,
     }
   }
 
@@ -357,12 +368,7 @@ impl Session {
   }
 
   fn render(&mut self) {
-    if let Some(until) = self.hint_until {
-      if Instant::now() >= until {
-        self.hint = None;
-        self.hint_until = None;
-      }
-    }
+    self.expire_hint();
     render::build(
       &mut self.chrome,
       self.selection,
@@ -408,6 +414,7 @@ impl Session {
     let _ = buffer.present();
   }
 
+  #[inline(always)]
   fn typing(mode: &Mode, label_size: f32) -> Option<(Point, &str, f32)> {
     if let Mode::Type(buffer, anchor) = mode {
       Some((*anchor, buffer.as_str(), label_size))
@@ -418,6 +425,9 @@ impl Session {
 
   fn mouse_move(&mut self, position: PhysicalPosition<f64>) {
     let p = Point::new(position.x as f32, position.y as f32);
+    if self.cursor == p {
+      return;
+    }
     self.cursor = p;
     let previous = self.hover;
     self.hover = self
@@ -448,25 +458,34 @@ impl Session {
         }
       }
       Mode::Rubber(anchor) => {
-        self.selection = Some(Rect::spanning(*anchor, p));
-        self.window.request_redraw();
+        let new_sel = Rect::spanning(*anchor, p);
+        if self.selection != Some(new_sel) {
+          self.selection = Some(new_sel);
+          self.window.request_redraw();
+        }
       }
       Mode::Draw(draft, anchor) => {
-        extend_draft(*anchor, draft, p);
-        self.window.request_redraw();
+        if extend_draft(*anchor, draft, p) {
+          self.window.request_redraw();
+        }
       }
       Mode::Move(last) => {
         let sel = self.selection.expect("move mode requires a selection");
         let moved =
           sel.moved_inside(self.bounds, Point::new(p.x - last.x, p.y - last.y));
-        self.selection = Some(moved);
+        if self.selection != Some(moved) {
+          self.selection = Some(moved);
+          self.window.request_redraw();
+        }
         *last = p;
-        self.window.request_redraw();
       }
       Mode::Resize(handle, rect) => {
         let target = p.clamped_inside(self.bounds);
-        self.selection = Some(resized(*rect, *handle, target));
-        self.window.request_redraw();
+        let resized_sel = resized(*rect, *handle, target);
+        if self.selection != Some(resized_sel) {
+          self.selection = Some(resized_sel);
+          self.window.request_redraw();
+        }
       }
       Mode::Type(_, _) => {}
     }
@@ -582,32 +601,45 @@ impl Session {
 
   fn deliver(&self, deliverable: Deliverable) -> Option<Outcome> {
     let sel = render::deliverable_region(self.selection)?;
-    let shot =
-      render::flatten(&self.canvas, sel, self.history.shapes(), &self.engine);
+    let source = self.inked_canvas.as_ref().unwrap_or(&self.canvas);
+    let shot = render::flatten(source, sel, &[], &self.engine);
     Some(Outcome::Deliver { deliverable, shot })
+  }
+
+  #[inline]
+  fn ink_into(
+    bd: &mut Pixmap,
+    cv: &mut Pixmap,
+    shape: &Shape,
+    engine: &TextEngine,
+  ) {
+    render::ink(bd, shape, Point::default(), engine);
+    render::ink(cv, shape, Point::default(), engine);
   }
 
   fn ink_shape(&mut self, shape: &Shape) {
     self.ensure_ink_buffers();
-    let bd = self.inked_backdrop.as_mut().unwrap();
-    let cv = self.inked_canvas.as_mut().unwrap();
-    render::ink(bd, shape, Point::default(), &self.engine);
-    render::ink(cv, shape, Point::default(), &self.engine);
+    Self::ink_into(
+      self.inked_backdrop.as_mut().unwrap(),
+      self.inked_canvas.as_mut().unwrap(),
+      shape,
+      &self.engine,
+    );
   }
 
   fn rebuild_ink(&mut self) {
     if self.history.shapes().is_empty() {
       self.inked_backdrop = None;
       self.inked_canvas = None;
-    } else {
-      let mut bd = self.backdrop.clone();
-      let mut cv = self.canvas.clone();
-      for shape in self.history.shapes() {
-        render::ink(&mut bd, shape, Point::default(), &self.engine);
-        render::ink(&mut cv, shape, Point::default(), &self.engine);
-      }
-      self.inked_backdrop = Some(bd);
-      self.inked_canvas = Some(cv);
+      return;
+    }
+    self.ensure_ink_buffers();
+    let bd = self.inked_backdrop.as_mut().unwrap();
+    let cv = self.inked_canvas.as_mut().unwrap();
+    bd.data_mut().copy_from_slice(self.backdrop.data());
+    cv.data_mut().copy_from_slice(self.canvas.data());
+    for shape in self.history.shapes() {
+      Self::ink_into(bd, cv, shape, &self.engine);
     }
   }
 
@@ -660,10 +692,12 @@ impl Session {
     None
   }
 
+  #[inline(always)]
   fn size(&self, tool: Tool) -> f32 {
     self.sizes[tool as usize]
   }
 
+  #[inline(always)]
   fn is_typing(&self) -> bool {
     matches!(self.mode, Mode::Type(..))
   }
@@ -692,16 +726,44 @@ fn format_size(size: f32) -> String {
   }
 }
 
-pub fn extend_draft(anchor: Point, draft: &mut Shape, p: Point) {
+pub fn extend_draft(anchor: Point, draft: &mut Shape, p: Point) -> bool {
   match draft {
     Shape::Stroke { points, .. } => {
-      if points.last() != Some(&p) {
+      if points
+        .last()
+        .is_none_or(|last| last.distance_squared(p) >= 1.0)
+      {
         points.push(p);
+        true
+      } else {
+        false
       }
     }
-    Shape::Line { to, .. } => *to = p,
-    Shape::Outline { rect, .. } => *rect = Rect::spanning(anchor, p),
-    Shape::Caption { at, .. } => *at = p,
+    Shape::Line { to, .. } => {
+      if *to != p {
+        *to = p;
+        true
+      } else {
+        false
+      }
+    }
+    Shape::Outline { rect, .. } => {
+      let new_rect = Rect::spanning(anchor, p);
+      if *rect != new_rect {
+        *rect = new_rect;
+        true
+      } else {
+        false
+      }
+    }
+    Shape::Caption { at, .. } => {
+      if *at != p {
+        *at = p;
+        true
+      } else {
+        false
+      }
+    }
   }
 }
 

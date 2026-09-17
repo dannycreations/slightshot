@@ -10,6 +10,7 @@ pub const PALETTE: [[u8; 3]; 7] = [
   [15, 23, 42],
 ];
 
+#[inline(always)]
 pub fn active_color(index: usize) -> [u8; 3] {
   PALETTE[index % PALETTE.len()]
 }
@@ -35,17 +36,28 @@ pub enum Tool {
   Label,
 }
 
+pub const TOOLS: [Tool; 7] = [
+  Tool::Select,
+  Tool::Pen,
+  Tool::Line,
+  Tool::Arrow,
+  Tool::Box,
+  Tool::Marker,
+  Tool::Label,
+];
+
 impl Tool {
+  #[inline(always)]
   pub fn default_size(self) -> f32 {
     match self {
       Tool::Select => 0.0,
-      Tool::Pen => LINE_WIDTH,
-      Tool::Line | Tool::Arrow | Tool::Box => LINE_WIDTH,
+      Tool::Pen | Tool::Line | Tool::Arrow | Tool::Box => LINE_WIDTH,
       Tool::Marker => MARKER_WIDTH,
       Tool::Label => LABEL_SIZE,
     }
   }
 
+  #[inline(always)]
   pub fn is_annotation(self) -> bool {
     !matches!(self, Tool::Select)
   }
@@ -60,18 +72,6 @@ impl Tool {
       Tool::Marker => "Marker",
       Tool::Label => "Text",
     }
-  }
-
-  pub fn all() -> &'static [Tool] {
-    &[
-      Tool::Select,
-      Tool::Pen,
-      Tool::Line,
-      Tool::Arrow,
-      Tool::Box,
-      Tool::Marker,
-      Tool::Label,
-    ]
   }
 }
 
@@ -116,7 +116,7 @@ impl Shape {
   pub fn is_complete(&self) -> bool {
     match self {
       Shape::Stroke { points, .. } => points.len() >= 2,
-      Shape::Line { from, to, .. } => from.distance(*to) >= 3.0,
+      Shape::Line { from, to, .. } => from.distance_squared(*to) >= 9.0,
       Shape::Outline { rect, .. } => rect.w >= 3.0 && rect.h >= 3.0,
       Shape::Caption { text, .. } => !text.trim().is_empty(),
     }
@@ -129,18 +129,22 @@ pub struct History {
 }
 
 impl History {
+  #[inline]
   pub fn push(&mut self, shape: Shape) {
     self.applied.push(shape);
   }
 
+  #[inline]
   pub fn undo(&mut self) -> bool {
     self.applied.pop().is_some()
   }
 
+  #[inline(always)]
   pub fn shapes(&self) -> &[Shape] {
     &self.applied
   }
 
+  #[inline(always)]
   pub fn can_undo(&self) -> bool {
     !self.applied.is_empty()
   }

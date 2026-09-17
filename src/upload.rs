@@ -1,4 +1,4 @@
-use std::{env, time::Duration};
+use std::{borrow::Cow, env, time::Duration};
 
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
@@ -73,16 +73,19 @@ fn parse_link(body: &str) -> Result<String> {
     .context("Imgur replied without an image link")
 }
 
-fn describe(error: &Value) -> String {
+fn describe<'a>(error: &'a Value) -> Cow<'a, str> {
   match error {
-    Value::Null => "unknown error".to_owned(),
-    Value::String(s) => s.clone(),
-    other => other.to_string(),
+    Value::Null => Cow::Borrowed("unknown error"),
+    Value::String(s) => Cow::Borrowed(s.as_str()),
+    other => Cow::Owned(other.to_string()),
   }
 }
 
-fn preview(body: &str) -> String {
-  body.chars().take(300).collect()
+fn preview(body: &str) -> &str {
+  match body.char_indices().nth(300) {
+    Some((idx, _)) => &body[..idx],
+    None => body,
+  }
 }
 
 #[cfg(test)]

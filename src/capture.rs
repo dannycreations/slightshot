@@ -22,31 +22,26 @@ pub struct ScreenShot {
   pub origin: (i32, i32),
 }
 
-struct DcGuard {
+struct GdiCaptureGuard {
   screen_dc: HDC,
-  mem_dc: HDC,
-}
-
-impl Drop for DcGuard {
-  fn drop(&mut self) {
-    unsafe {
-      let _ = DeleteDC(self.mem_dc);
-      ReleaseDC(None, self.screen_dc);
-    }
-  }
-}
-
-struct BmpGuard {
   mem_dc: HDC,
   bmp: HGDIOBJ,
   previous: HGDIOBJ,
 }
 
-impl Drop for BmpGuard {
+impl Drop for GdiCaptureGuard {
   fn drop(&mut self) {
     unsafe {
-      SelectObject(self.mem_dc, self.previous);
-      let _ = DeleteObject(self.bmp);
+      if !self.bmp.is_invalid() {
+        SelectObject(self.mem_dc, self.previous);
+        let _ = DeleteObject(self.bmp);
+      }
+      if !self.mem_dc.is_invalid() {
+        let _ = DeleteDC(self.mem_dc);
+      }
+      if !self.screen_dc.is_invalid() {
+        ReleaseDC(None, self.screen_dc);
+      }
     }
   }
 }
@@ -68,7 +63,13 @@ pub fn grab() -> Result<ScreenShot> {
       ReleaseDC(None, screen_dc);
       bail!("CreateCompatibleDC failed");
     }
-    let dc_guard = DcGuard { screen_dc, mem_dc };
+
+    let mut guard = GdiCaptureGuard {
+      screen_dc,
+      mem_dc,
+      bmp: HGDIOBJ::default(),
+      previous: HGDIOBJ::default(),
+    };
 
     let info = BITMAPINFO {
       bmiHeader: BITMAPINFOHEADER {
@@ -83,16 +84,14 @@ pub fn grab() -> Result<ScreenShot> {
       },
       ..BITMAPINFO::default()
     };
+
     let mut bits: *mut c_void = ptr::null_mut();
     let bmp =
       CreateDIBSection(Some(mem_dc), &info, DIB_RGB_COLORS, &mut bits, None, 0)
         .context("CreateDIBSection failed")?;
-    let previous = SelectObject(mem_dc, bmp.into());
-    let bmp_guard = BmpGuard {
-      mem_dc,
-      bmp: bmp.into(),
-      previous,
-    };
+
+    guard.previous = SelectObject(mem_dc, bmp.into());
+    guard.bmp = bmp.into();
 
     BitBlt(
       mem_dc,
@@ -107,18 +106,18 @@ pub fn grab() -> Result<ScreenShot> {
     )
     .context("BitBlt of the desktop failed")?;
 
-    let raw = slice::from_raw_parts(bits as *const u8, pixels);
-    let mut rgba = Vec::with_capacity(pixels);
-    rgba.extend(std::iter::repeat_n(0, pixels));
-    swap_channels(raw, &mut rgba);
-
-    drop(bmp_guard);
-    drop(dc_guard);
-
     let size = IntSize::from_wh(width as u32, height as u32)
-      .context("zero-sized capture")?;
-    let pixmap = Pixmap::from_vec(rgba, size)
-      .context("captured buffer did not match the display")?;
+      .context("invalid capture dimensions")?;
+    let mut data = vec![0u8; pixels];
+
+    let raw = slice::from_raw_parts(bits as *const u8, pixels);
+    swap_channels(raw, &mut data);
+
+    let pixmap = Pixmap::from_vec(data, size)
+      .context("zero-sized capture or allocation failed")?;
+
+    drop(guard);
+
     Ok(ScreenShot {
       pixmap,
       origin: (x, y),

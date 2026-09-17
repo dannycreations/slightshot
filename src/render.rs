@@ -1,5 +1,3 @@
-use std::fmt::Write;
-
 use tiny_skia::Pixmap;
 
 use crate::{
@@ -82,6 +80,7 @@ fn button(
   }
 }
 
+#[inline(always)]
 pub fn deliverable_region(selection: Option<Rect>) -> Option<Rect> {
   selection.filter(|sel| sel.w >= MIN_REGION && sel.h >= MIN_REGION)
 }
@@ -96,7 +95,10 @@ pub fn build(
 ) {
   let ready = deliverable_region(selection).is_some();
 
-  if chrome.tools.len() != 8 {
+  // These panels are built once and then mutated in place; `is_empty` (rather
+  // than checking against the literal's length) is the only thing that needs
+  // to stay in sync with the button lists below.
+  if chrome.tools.is_empty() {
     chrome.tools = vec![
       button(Command::Tool(Tool::Pen), draw::Icon::Pen, true, false),
       button(Command::Tool(Tool::Line), draw::Icon::Line, true, false),
@@ -108,7 +110,7 @@ pub fn build(
       button(Command::Undo, draw::Icon::Undo, false, false),
     ];
   }
-  if chrome.actions.len() != 4 {
+  if chrome.actions.is_empty() {
     chrome.actions = vec![
       button(
         Command::Deliver(Deliverable::Upload),
@@ -304,11 +306,13 @@ const DIM_LUT: [u8; 256] = {
 };
 
 pub fn dimmed_copy(frame: &Pixmap) -> Pixmap {
+  let width = frame.width();
+  let height = frame.height();
+  let mut out = Pixmap::new(width, height).expect("valid frame dimensions");
   let src = frame.data();
-  let mut data = vec![0u8; src.len()];
-
-  let dst_chunks = data.as_chunks_mut::<4>().0;
+  let dst = out.data_mut();
   let src_chunks = src.as_chunks::<4>().0;
+  let dst_chunks = dst.as_chunks_mut::<4>().0;
 
   for (dst_px, src_px) in dst_chunks.iter_mut().zip(src_chunks) {
     dst_px[0] = DIM_LUT[src_px[0] as usize];
@@ -317,10 +321,7 @@ pub fn dimmed_copy(frame: &Pixmap) -> Pixmap {
     dst_px[3] = src_px[3];
   }
 
-  let width = frame.width();
-  let height = frame.height();
-  Pixmap::from_vec(data, tiny_skia::IntSize::from_wh(width, height).unwrap())
-    .expect("valid frame dimensions")
+  out
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -336,9 +337,26 @@ fn blit(
   width: usize,
   height: usize,
 ) {
+  if width == 0 || height == 0 {
+    return;
+  }
   let row_bytes = width * 4;
   let src_stride_bytes = source_stride_px * 4;
   let dst_stride_bytes = dest_stride_px * 4;
+
+  if row_bytes == src_stride_bytes
+    && row_bytes == dst_stride_bytes
+    && dest_x == 0
+    && source_x == 0
+  {
+    let total = row_bytes * height;
+    let dst_start = dest_y * dst_stride_bytes;
+    let src_start = source_y * src_stride_bytes;
+    dest[dst_start..dst_start + total]
+      .copy_from_slice(&source[src_start..src_start + total]);
+    return;
+  }
+
   let mut src = (source_y * source_stride_px + source_x) * 4;
   let mut dst = (dest_y * dest_stride_px + dest_x) * 4;
   for _ in 0..height {
@@ -359,6 +377,7 @@ fn draw_live(pm: &mut Pixmap, scene: &Scene) {
   }
 }
 
+#[inline(always)]
 fn region_pixels(sel: Rect, px_w: i32, px_h: i32) -> (i32, i32, i32, i32) {
   let x0 = sel.x.floor().max(0.0) as i32;
   let y0 = sel.y.floor().max(0.0) as i32;
@@ -397,9 +416,11 @@ pub fn flatten(
     width as usize,
     height as usize,
   );
-  let origin = Point::new(x0 as f32, y0 as f32);
-  for shape in shapes {
-    ink(&mut layer, shape, origin, text);
+  if !shapes.is_empty() {
+    let origin = Point::new(x0 as f32, y0 as f32);
+    for shape in shapes {
+      ink(&mut layer, shape, origin, text);
+    }
   }
   Shot {
     width: width as u32,
@@ -492,8 +513,7 @@ fn draw_handles(pm: &mut Pixmap, sel: Rect) {
 }
 
 fn draw_badge(pm: &mut Pixmap, sel: Rect, bounds: Rect, engine: &TextEngine) {
-  let mut label = String::with_capacity(16);
-  let _ = write!(label, "{}x{}", sel.w.round() as i64, sel.h.round() as i64);
+  let label = format!("{}x{}", sel.w.round() as i64, sel.h.round() as i64);
 
   let text_width = engine.width(&label, BADGE_TEXT);
   let pad = 6.0;
@@ -605,7 +625,7 @@ fn tooltip_rect(
       } else {
         area.right() + TOOLTIP_GAP
       };
-      (x, area.center().y - h / 2.0)
+      (x, area.center().y - h * 0.5)
     }
     Side::Above => {
       let y = if area.y - TOOLTIP_GAP - h >= bounds.y {
@@ -613,7 +633,7 @@ fn tooltip_rect(
       } else {
         area.bottom() + TOOLTIP_GAP
       };
-      (area.center().x - w / 2.0, y)
+      (area.center().x - w * 0.5, y)
     }
   };
   bx = bx.clamp(bounds.x, (bounds.right() - w).max(bounds.x));

@@ -1,6 +1,27 @@
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 use std::slice;
+#[cfg(target_arch = "x86_64")]
+use std::sync::atomic::{AtomicU8, Ordering};
+
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+fn get_simd_level() -> u8 {
+  static LEVEL: AtomicU8 = AtomicU8::new(0);
+  let lvl = LEVEL.load(Ordering::Relaxed);
+  if lvl != 0 {
+    return lvl;
+  }
+  let detected = if is_x86_feature_detected!("avx2") {
+    3
+  } else if is_x86_feature_detected!("ssse3") {
+    2
+  } else {
+    1
+  };
+  LEVEL.store(detected, Ordering::Relaxed);
+  detected
+}
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
@@ -95,35 +116,43 @@ pub fn swap_channels(src: &[u8], dst: &mut [u8]) {
 
   #[cfg(target_arch = "x86_64")]
   {
-    if is_x86_feature_detected!("avx2") {
-      let simd_bytes = total_bytes & !31;
-      if simd_bytes > 0 {
-        unsafe {
-          swap_channels_avx2(src.as_ptr(), dst.as_mut_ptr(), simd_bytes);
+    match get_simd_level() {
+      3 => {
+        let simd_bytes = total_bytes & !31;
+        if simd_bytes > 0 {
+          unsafe {
+            swap_channels_avx2(src.as_ptr(), dst.as_mut_ptr(), simd_bytes);
+          }
+          processed = simd_bytes;
         }
-        processed = simd_bytes;
       }
-    } else if is_x86_feature_detected!("ssse3") {
-      let simd_bytes = total_bytes & !15;
-      if simd_bytes > 0 {
-        unsafe {
-          swap_channels_ssse3(src.as_ptr(), dst.as_mut_ptr(), simd_bytes);
+      2 => {
+        let simd_bytes = total_bytes & !15;
+        if simd_bytes > 0 {
+          unsafe {
+            swap_channels_ssse3(src.as_ptr(), dst.as_mut_ptr(), simd_bytes);
+          }
+          processed = simd_bytes;
         }
-        processed = simd_bytes;
       }
+      _ => {}
     }
   }
 
-  for (out, chunk) in dst[processed..total_bytes]
+  let remaining_src = &src[processed..total_bytes];
+  let remaining_dst = &mut dst[processed..total_bytes];
+  for (out, chunk) in remaining_dst
     .as_chunks_mut::<4>()
     .0
     .iter_mut()
-    .zip(src[processed..total_bytes].as_chunks::<4>().0)
+    .zip(remaining_src.as_chunks::<4>().0)
   {
-    out[0] = chunk[2];
-    out[1] = chunk[1];
-    out[2] = chunk[0];
-    out[3] = 255;
+    let px = u32::from_ne_bytes(*chunk);
+    let swapped = ((px & 0x00FF_0000) >> 16)
+      | ((px & 0x0000_00FF) << 16)
+      | (px & 0x0000_FF00)
+      | 0xFF00_0000;
+    *out = swapped.to_ne_bytes();
   }
 }
 

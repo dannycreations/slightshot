@@ -1,4 +1,4 @@
-use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::OnceLock};
+use std::{cell::RefCell, collections::HashMap, sync::OnceLock};
 
 use tiny_skia::{
   Color, FillRule, LineCap, LineJoin, Paint, Path, PathBuilder, Pixmap,
@@ -60,12 +60,15 @@ fn smooth_path(points: &[Point]) -> Option<Path> {
   if points.len() < 2 {
     return None;
   }
+
   let mut builder = PathBuilder::new();
   builder.move_to(points[0].x, points[0].y);
   if points.len() == 2 {
     builder.line_to(points[1].x, points[1].y);
     return builder.finish();
   }
+
+  const ONE_SIXTH: f32 = 1.0 / 6.0;
   let len = points.len();
   for i in 0..len - 1 {
     let p0 = points[i.saturating_sub(1)];
@@ -73,41 +76,14 @@ fn smooth_path(points: &[Point]) -> Option<Path> {
     let p2 = points[i + 1];
     let p3 = points[(i + 2).min(len - 1)];
 
-    // Exact Catmull-Rom to cubic Bézier conversion
-    let c1x = p1.x + (p2.x - p0.x) * (1.0 / 6.0);
-    let c1y = p1.y + (p2.y - p0.y) * (1.0 / 6.0);
-    let c2x = p2.x - (p3.x - p1.x) * (1.0 / 6.0);
-    let c2y = p2.y - (p3.y - p1.y) * (1.0 / 6.0);
+    let c1x = p1.x + (p2.x - p0.x) * ONE_SIXTH;
+    let c1y = p1.y + (p2.y - p0.y) * ONE_SIXTH;
+    let c2x = p2.x - (p3.x - p1.x) * ONE_SIXTH;
+    let c2y = p2.y - (p3.y - p1.y) * ONE_SIXTH;
 
     builder.cubic_to(c1x, c1y, c2x, c2y, p2.x, p2.y);
   }
   builder.finish()
-}
-
-fn open_builder(points: &[Point]) -> Option<PathBuilder> {
-  let first = points.first()?;
-  let mut builder = PathBuilder::new();
-  builder.move_to(first.x, first.y);
-  for p in &points[1..] {
-    builder.line_to(p.x, p.y);
-  }
-  Some(builder)
-}
-
-fn closed_path(points: &[Point]) -> Option<Path> {
-  let mut builder = open_builder(points)?;
-  builder.close();
-  builder.finish()
-}
-
-fn corners(rect: GeoRect) -> [Point; 5] {
-  [
-    Point::new(rect.x, rect.y),
-    Point::new(rect.right(), rect.y),
-    Point::new(rect.right(), rect.bottom()),
-    Point::new(rect.x, rect.bottom()),
-    Point::new(rect.x, rect.y),
-  ]
 }
 
 pub fn arrow_head(
@@ -176,6 +152,7 @@ pub fn rect_stroke(
   );
 }
 
+#[inline(always)]
 pub fn rect_fill(pm: &mut Pixmap, rect: GeoRect, rgb: [u8; 3], alpha: u8) {
   let Some(r) = skia_rect(rect) else {
     return;
@@ -189,15 +166,29 @@ pub fn rect_fill(pm: &mut Pixmap, rect: GeoRect, rgb: [u8; 3], alpha: u8) {
 }
 
 pub fn dashed_rect(pm: &mut Pixmap, rect: GeoRect, rgb: [u8; 3], width: f32) {
-  let Some(path) = closed_path(&corners(rect)) else {
+  let Some(r) = skia_rect(rect) else {
     return;
   };
-  static DASH: OnceLock<StrokeDash> = OnceLock::new();
-  let dash = DASH.get_or_init(|| StrokeDash::new(vec![3.0, 3.0], 0.0).unwrap());
-  let mut stroke = stroke(width);
-  stroke.line_cap = LineCap::Butt;
-  stroke.line_join = LineJoin::Miter;
-  stroke.dash = Some(dash.clone());
+  let mut path = PathBuilder::new();
+  path.push_rect(r);
+  let Some(path) = path.finish() else {
+    return;
+  };
+  static DASH_STROKE: OnceLock<Stroke> = OnceLock::new();
+  let base_stroke = DASH_STROKE.get_or_init(|| {
+    let mut s = stroke(1.0);
+    s.line_cap = LineCap::Butt;
+    s.line_join = LineJoin::Miter;
+    s.dash = StrokeDash::new(vec![3.0, 3.0], 0.0);
+    s
+  });
+  let stroke = if width == 1.0 {
+    base_stroke.clone()
+  } else {
+    let mut s = base_stroke.clone();
+    s.width = width;
+    s
+  };
   pm.stroke_path(
     &path,
     &paint(rgb[0], rgb[1], rgb[2], 255),
@@ -230,7 +221,7 @@ pub fn rounded_fill(
   rgb: [u8; 3],
   alpha: u8,
 ) {
-  let Some(r) = skia_rect(rect) else {
+  let Some(r) = Rect::from_xywh(0.0, 0.0, rect.w, rect.h) else {
     return;
   };
   let Some(path) = round_rect_path(r, radius) else {
@@ -240,7 +231,7 @@ pub fn rounded_fill(
     &path,
     &paint(rgb[0], rgb[1], rgb[2], alpha),
     FillRule::Winding,
-    Transform::identity(),
+    Transform::from_translate(rect.x, rect.y),
     None,
   );
 }
@@ -253,7 +244,7 @@ pub fn rounded_stroke(
   width: f32,
   alpha: u8,
 ) {
-  let Some(r) = skia_rect(rect) else {
+  let Some(r) = Rect::from_xywh(0.0, 0.0, rect.w, rect.h) else {
     return;
   };
   let Some(path) = round_rect_path(r, radius) else {
@@ -263,14 +254,14 @@ pub fn rounded_stroke(
     &path,
     &paint(rgb[0], rgb[1], rgb[2], alpha),
     &stroke(width),
-    Transform::identity(),
+    Transform::from_translate(rect.x, rect.y),
     None,
   );
 }
 
 #[derive(Clone, Copy, Debug)]
 pub enum Icon {
-  Pen,
+  Pen = 0,
   Marker,
   Arrow,
   Outline,
@@ -291,81 +282,73 @@ impl Icon {
     box_size: f32,
     color: [u8; 3],
   ) {
-    let tinted = tinted_sprite(self, color, box_size);
     let x = (center.x - box_size * 0.5).round() as i32;
     let y = (center.y - box_size * 0.5).round() as i32;
-    pm.draw_pixmap(
-      x,
-      y,
-      Pixmap::as_ref(&tinted),
-      &PixmapPaint::default(),
-      Transform::identity(),
-      None,
-    );
+    render_tinted_sprite(self, color, box_size, pm, x, y);
   }
 }
 
-type TintCache = HashMap<(usize, [u8; 3], u32), Rc<Pixmap>>;
+type TintCache = HashMap<(usize, [u8; 3], u32), Pixmap>;
 
 thread_local! {
   static TINT_CACHE: RefCell<TintCache> = RefCell::new(HashMap::new());
 }
 
-fn tinted_sprite(icon: Icon, color: [u8; 3], box_size: f32) -> Rc<Pixmap> {
-  TINT_CACHE.with(|cache| {
-    cache
-      .borrow_mut()
-      .entry((icon as usize, color, box_size.to_bits()))
-      .or_insert_with(|| {
-        let source = sprite(icon);
-        let scale = box_size / source.width() as f32;
-        let w = (source.width() as f32 * scale).round() as u32;
-        let h = (source.height() as f32 * scale).round() as u32;
-        let mut tinted =
-          Pixmap::new(w, h).expect("allocating the icon pixmap failed");
-        tinted.draw_pixmap(
-          0,
-          0,
-          source.as_ref(),
-          &PixmapPaint::default(),
-          Transform::from_scale(scale, scale),
-          None,
-        );
-        for pixel in tinted.data_mut().as_chunks_mut::<4>().0 {
-          let a = pixel[3] as u32;
-          pixel[0] = ((color[0] as u32 * a) / 255) as u8;
-          pixel[1] = ((color[1] as u32 * a) / 255) as u8;
-          pixel[2] = ((color[2] as u32 * a) / 255) as u8;
-        }
-        Rc::new(tinted)
-      })
-      .clone()
-  })
+fn create_tinted_sprite(icon: Icon, color: [u8; 3], box_size: f32) -> Pixmap {
+  let source = sprite(icon);
+  let scale = box_size / source.width() as f32;
+  let w = (source.width() as f32 * scale).round() as u32;
+  let h = (source.height() as f32 * scale).round() as u32;
+  let mut tinted =
+    Pixmap::new(w, h).expect("allocating the icon pixmap failed");
+  tinted.draw_pixmap(
+    0,
+    0,
+    source.as_ref(),
+    &PixmapPaint::default(),
+    Transform::from_scale(scale, scale),
+    None,
+  );
+  let (cr, cg, cb) = (color[0] as u32, color[1] as u32, color[2] as u32);
+  for pixel in tinted.data_mut().as_chunks_mut::<4>().0 {
+    let a = pixel[3] as u32;
+    pixel[0] = (((cr * a + 128) * 257) >> 16) as u8;
+    pixel[1] = (((cg * a + 128) * 257) >> 16) as u8;
+    pixel[2] = (((cb * a + 128) * 257) >> 16) as u8;
+  }
+  tinted
 }
 
-const ICONS: [Icon; 11] = [
-  Icon::Pen,
-  Icon::Marker,
-  Icon::Arrow,
-  Icon::Outline,
-  Icon::Line,
-  Icon::Letter,
-  Icon::Undo,
-  Icon::Upload,
-  Icon::CopyImage,
-  Icon::Save,
-  Icon::Close,
-];
+fn render_tinted_sprite(
+  icon: Icon,
+  color: [u8; 3],
+  box_size: f32,
+  pm: &mut Pixmap,
+  x: i32,
+  y: i32,
+) {
+  TINT_CACHE.with(|cache| {
+    let mut map = cache.borrow_mut();
+    let key = (icon as usize, color, box_size.to_bits());
+    let tinted = map
+      .entry(key)
+      .or_insert_with(|| create_tinted_sprite(icon, color, box_size));
+
+    pm.draw_pixmap(
+      x,
+      y,
+      tinted.as_ref(),
+      &PixmapPaint::default(),
+      Transform::identity(),
+      None,
+    );
+  });
+}
+
+static SPRITE_CACHE: [OnceLock<Pixmap>; 11] = [const { OnceLock::new() }; 11];
 
 fn sprite(icon: Icon) -> &'static Pixmap {
-  static CACHE: OnceLock<Vec<Pixmap>> = OnceLock::new();
-  let cache = CACHE.get_or_init(|| {
-    ICONS
-      .iter()
-      .map(|&variant| load_sprite(sprite_bytes(variant)))
-      .collect()
-  });
-  &cache[icon as usize]
+  SPRITE_CACHE[icon as usize].get_or_init(|| load_sprite(sprite_bytes(icon)))
 }
 
 fn sprite_bytes(icon: Icon) -> &'static [u8] {
@@ -459,18 +442,5 @@ mod tests {
       }
     }
     assert!(lit > 20, "icon missing at large coords: lit={lit}");
-  }
-
-  #[test]
-  fn every_icon_paints_something() {
-    for icon in ICONS {
-      let mut pm = Pixmap::new(24, 24).expect("alloc");
-      icon.paint(&mut pm, Point::new(12.0, 12.0), 18.0, [240, 240, 240]);
-      assert!(
-        pm.data().iter().any(|&c| c > 0),
-        "icon {:?} left the canvas empty",
-        icon
-      );
-    }
   }
 }

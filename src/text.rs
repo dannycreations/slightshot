@@ -1,9 +1,8 @@
 use std::{
   cell::RefCell,
-  collections::HashMap,
+  collections::hash_map::{Entry, HashMap},
   env, fs,
   path::Path,
-  rc::Rc,
   sync::{Arc, OnceLock},
 };
 
@@ -15,7 +14,7 @@ const FONT_FILES: [&str; 4] =
   ["segoeui.ttf", "arial.ttf", "tahoma.ttf", "calibri.ttf"];
 const ASCENT_RATIO: f32 = 0.8;
 
-struct Glyph {
+pub struct Glyph {
   metrics: Metrics,
   coverage: Vec<u8>,
 }
@@ -49,8 +48,8 @@ fn get_system_font() -> Option<Arc<Font>> {
 
 #[derive(Default)]
 pub struct TextEngine {
-  font: Option<Arc<Font>>,
-  cache: RefCell<HashMap<(char, u32), Rc<Glyph>>>,
+  pub font: Option<Arc<Font>>,
+  pub cache: RefCell<HashMap<(char, u32), Glyph>>,
 }
 
 impl TextEngine {
@@ -59,8 +58,25 @@ impl TextEngine {
       .ok_or_else(|| anyhow!("no system font found under Windows\\Fonts"))?;
     Ok(Self {
       font: Some(font),
-      cache: RefCell::new(HashMap::new()),
+      cache: RefCell::new(HashMap::with_capacity(64)),
     })
+  }
+
+  fn glyph_for<'a>(
+    cache: &'a mut HashMap<(char, u32), Glyph>,
+    font: Option<&Font>,
+    ch: char,
+    size: f32,
+    size_bits: u32,
+  ) -> Option<&'a Glyph> {
+    match cache.entry((ch, size_bits)) {
+      Entry::Occupied(entry) => Some(entry.into_mut()),
+      Entry::Vacant(entry) => {
+        let font = font?;
+        let (metrics, coverage) = font.rasterize(ch, size);
+        Some(entry.insert(Glyph { metrics, coverage }))
+      }
+    }
   }
 
   pub fn draw(
@@ -72,22 +88,31 @@ impl TextEngine {
     size: f32,
     rgb: [u8; 3],
   ) {
+    let size_bits = size.to_bits();
     let baseline = y + size * ASCENT_RATIO;
     let mut pen = x;
     let (pw, ph) = (pm.width() as i32, pm.height() as i32);
+    let pm_data = pm.data_mut();
+
+    let mut cache = self.cache.borrow_mut();
     for ch in text.chars() {
-      let glyph = self.raster(ch, size);
+      let Some(glyph) =
+        Self::glyph_for(&mut cache, self.font.as_deref(), ch, size, size_bits)
+      else {
+        continue;
+      };
+
       let m = &glyph.metrics;
       if m.width > 0 && m.height > 0 {
         let left = pen + m.xmin as f32;
         let top = baseline - (m.ymin + m.height as i32) as f32;
         Self::blend(
-          pm.data_mut(),
+          pm_data,
           pw,
           ph,
           left.round() as i32,
           top.round() as i32,
-          &glyph,
+          glyph,
           rgb,
         );
       }
@@ -95,33 +120,15 @@ impl TextEngine {
     }
   }
 
-  fn raster(&self, ch: char, size: f32) -> Rc<Glyph> {
-    let key = (ch, size.to_bits());
-    if let Some(glyph) = self.cache.borrow().get(&key) {
-      return Rc::clone(glyph);
-    }
-    let Some(font) = self.font.as_ref() else {
-      return Rc::new(Glyph {
-        metrics: Metrics::default(),
-        coverage: Vec::new(),
-      });
-    };
-    let (metrics, coverage) = font.rasterize(ch, size);
-    let glyph = Rc::new(Glyph { metrics, coverage });
-    self.cache.borrow_mut().insert(key, Rc::clone(&glyph));
-    glyph
-  }
-
   pub fn width(&self, text: &str, size: f32) -> f32 {
+    let size_bits = size.to_bits();
     let mut total = 0.0;
+    let mut cache = self.cache.borrow_mut();
     for ch in text.chars() {
-      let key = (ch, size.to_bits());
-      if let Some(glyph) = self.cache.borrow().get(&key) {
+      if let Some(glyph) =
+        Self::glyph_for(&mut cache, self.font.as_deref(), ch, size, size_bits)
+      {
         total += glyph.metrics.advance_width;
-        continue;
-      }
-      if let Some(font) = &self.font {
-        total += font.metrics(ch, size).advance_width;
       }
     }
     total
@@ -160,10 +167,15 @@ impl TextEngine {
     let (r, g, b) = (rgb[0] as u32, rgb[1] as u32, rgb[2] as u32);
 
     for row in row_start..row_end {
-      let py = (gy + row as i32) as usize;
-      let px = (gx + col_start as i32) as usize;
       let cov_offset = row * gw as usize + col_start;
       let coverage = &glyph.coverage[cov_offset..cov_offset + cols];
+
+      if coverage.iter().all(|&c| c == 0) {
+        continue;
+      }
+
+      let py = (gy + row as i32) as usize;
+      let px = (gx + col_start as i32) as usize;
       let di = (py * pw as usize + px) * 4;
       let dest = &mut pm[di..di + cols * 4];
 
@@ -180,9 +192,12 @@ impl TextEngine {
           chunk[3] = 255;
         } else {
           let inv = 255 - a;
-          chunk[0] = ((chunk[0] as u32 * inv + r * a) / 255) as u8;
-          chunk[1] = ((chunk[1] as u32 * inv + g * a) / 255) as u8;
-          chunk[2] = ((chunk[2] as u32 * inv + b * a) / 255) as u8;
+          let r_val = chunk[0] as u32 * inv + r * a;
+          let g_val = chunk[1] as u32 * inv + g * a;
+          let b_val = chunk[2] as u32 * inv + b * a;
+          chunk[0] = ((r_val * 32897) >> 23) as u8;
+          chunk[1] = ((g_val * 32897) >> 23) as u8;
+          chunk[2] = ((b_val * 32897) >> 23) as u8;
           chunk[3] = (chunk[3] as u32 + a).min(255) as u8;
         }
       }

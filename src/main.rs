@@ -34,15 +34,15 @@ fn run() -> Result<()> {
     let _ =
       SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
   }
-  println!("slightshot: starting; Numpad 8 will snapshot the screen for selection. Ctrl+C here quits.");
+  println!("slightshot: press Ctrl+C here to quits.");
   let event_loop = EventLoop::<hotkey::Trigger>::with_user_event().build()?;
   let proxy = event_loop.create_proxy();
   hotkey::spawn(proxy.clone())?;
-  println!("slightshot: watching Numpad 8.");
+  println!("slightshot: press Numpad 8 will snapshot the screen.");
   ctrlc::set_handler(move || {
     let _ = proxy.send_event(hotkey::Trigger::Quit);
   })?;
   event_loop.run_app(&mut App::default())?;
-  println!("slightshot: stopped watching Numpad 8.");
+  println!("slightshot: unwatching Numpad 8.");
   Ok(())
 }
