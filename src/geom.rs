@@ -5,12 +5,21 @@ pub struct Point {
 }
 
 impl Point {
+  #[inline(always)]
   pub fn new(x: f32, y: f32) -> Self {
     Self { x, y }
   }
 
+  #[inline(always)]
   pub fn distance(self, other: Point) -> f32 {
     (self.x - other.x).hypot(self.y - other.y)
+  }
+
+  #[inline(always)]
+  pub fn distance_squared(self, other: Point) -> f32 {
+    let dx = self.x - other.x;
+    let dy = self.y - other.y;
+    dx * dx + dy * dy
   }
 
   pub fn clamped_inside(self, bounds: Rect) -> Point {
@@ -69,10 +78,12 @@ impl Rect {
     Self::new(x, y, w, h)
   }
 
+  #[inline(always)]
   pub fn right(self) -> f32 {
     self.x + self.w
   }
 
+  #[inline(always)]
   pub fn bottom(self) -> f32 {
     self.y + self.h
   }
@@ -127,10 +138,11 @@ pub fn handle_anchor(rect: Rect, handle: Handle) -> Point {
 }
 
 pub fn hit_handle(rect: Rect, p: Point, slop: f32) -> Option<Handle> {
+  let slop_sq = slop * slop;
   HANDLES
     .iter()
     .copied()
-    .find(|&h| handle_anchor(rect, h).distance(p) <= slop)
+    .find(|&h| handle_anchor(rect, h).distance_squared(p) <= slop_sq)
 }
 
 pub fn resized(rect: Rect, handle: Handle, target: Point) -> Rect {

@@ -1,14 +1,14 @@
 use std::{
   borrow::Cow,
   env, fs,
-  io::Cursor,
+  io::{BufWriter, Cursor, Write},
   path::{Path, PathBuf},
   time::SystemTime,
 };
 
 use anyhow::{Context, Result};
 use arboard::{Clipboard, ImageData};
-use png::{BitDepth, ColorType, Encoder};
+use png::{BitDepth, ColorType, Compression, Encoder};
 
 use crate::upload;
 
@@ -85,22 +85,29 @@ fn stamp() -> String {
   format!("slightshot_{seconds}.png")
 }
 
+fn write_png<W: Write>(shot: &Shot, writer: W) -> Result<()> {
+  let mut encoder = Encoder::new(writer, shot.width, shot.height);
+  encoder.set_color(ColorType::Rgba);
+  encoder.set_depth(BitDepth::Eight);
+  encoder.set_compression(Compression::Fast);
+  let mut stream_writer = encoder.write_header()?;
+  stream_writer.write_image_data(&shot.rgba)?;
+  stream_writer.finish()?;
+  Ok(())
+}
+
 fn png_bytes(shot: &Shot) -> Result<Vec<u8>> {
   let mut cursor = Cursor::new(Vec::new());
-  {
-    let mut encoder = Encoder::new(&mut cursor, shot.width, shot.height);
-    encoder.set_color(ColorType::Rgba);
-    encoder.set_depth(BitDepth::Eight);
-    let mut writer = encoder.write_header()?;
-    writer.write_image_data(&shot.rgba)?;
-    writer.finish()?;
-  }
+  write_png(shot, &mut cursor)?;
   Ok(cursor.into_inner())
 }
 
 fn encode_png(shot: &Shot, path: &Path) -> Result<()> {
-  fs::write(path, png_bytes(shot)?)
-    .with_context(|| format!("cannot create {}", path.display()))
+  let file = fs::File::create(path)
+    .with_context(|| format!("cannot create {}", path.display()))?;
+  let writer = BufWriter::new(file);
+  write_png(shot, writer)
+    .with_context(|| format!("failed writing png to {}", path.display()))
 }
 
 fn copy_to_clipboard(shot: &Shot) -> Result<()> {

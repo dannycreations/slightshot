@@ -7,10 +7,12 @@ use tiny_skia::{
 
 use crate::geom::{Point, Rect as GeoRect};
 
+#[inline(always)]
 fn skia_rect(rect: GeoRect) -> Option<Rect> {
   Rect::from_xywh(rect.x, rect.y, rect.w, rect.h)
 }
 
+#[inline(always)]
 fn paint(r: u8, g: u8, b: u8, a: u8) -> Paint<'static> {
   Paint {
     anti_alias: true,
@@ -19,6 +21,7 @@ fn paint(r: u8, g: u8, b: u8, a: u8) -> Paint<'static> {
   }
 }
 
+#[inline(always)]
 fn stroke(width: f32) -> Stroke {
   Stroke {
     width,
@@ -47,6 +50,31 @@ pub fn polyline(
   );
 }
 
+pub fn polyline_offset(
+  pm: &mut Pixmap,
+  pts: &[Point],
+  rgb: [u8; 3],
+  width: f32,
+  alpha: u8,
+  offset: Point,
+) {
+  let Some(path) = smooth_path(pts) else {
+    return;
+  };
+  let transform = if offset.x == 0.0 && offset.y == 0.0 {
+    Transform::identity()
+  } else {
+    Transform::from_translate(-offset.x, -offset.y)
+  };
+  pm.stroke_path(
+    &path,
+    &paint(rgb[0], rgb[1], rgb[2], alpha),
+    &stroke(width),
+    transform,
+    None,
+  );
+}
+
 const SMOOTH_MAX_STEPS: usize = 16;
 const SMOOTH_STEP_LENGTH: f32 = 6.0;
 
@@ -60,32 +88,36 @@ fn smooth_path(points: &[Point]) -> Option<Path> {
     builder.line_to(points[1].x, points[1].y);
     return builder.finish();
   }
-  for i in 0..points.len() - 1 {
-    let prev = points[i.saturating_sub(1)];
-    let curr = points[i];
-    let next = points[i + 1];
-    let after = points[(i + 2).min(points.len() - 1)];
-    let steps = ((curr.distance(next) / SMOOTH_STEP_LENGTH).ceil() as usize)
-      .clamp(1, SMOOTH_MAX_STEPS);
+  let len = points.len();
+  for i in 0..len - 1 {
+    let p0 = points[i.saturating_sub(1)];
+    let p1 = points[i];
+    let p2 = points[i + 1];
+    let p3 = points[(i + 2).min(len - 1)];
+
+    let dist = p1.distance(p2);
+    let steps =
+      ((dist / SMOOTH_STEP_LENGTH).ceil() as usize).clamp(1, SMOOTH_MAX_STEPS);
+    let inv_steps = 1.0 / steps as f32;
+
+    // Horner's form coefficients for Catmull-Rom spline
+    let ax = 0.5 * (-p0.x + 3.0 * p1.x - 3.0 * p2.x + p3.x);
+    let ay = 0.5 * (-p0.y + 3.0 * p1.y - 3.0 * p2.y + p3.y);
+    let bx = 0.5 * (2.0 * p0.x - 5.0 * p1.x + 4.0 * p2.x - p3.x);
+    let by = 0.5 * (2.0 * p0.y - 5.0 * p1.y + 4.0 * p2.y - p3.y);
+    let cx = 0.5 * (-p0.x + p2.x);
+    let cy = 0.5 * (-p0.y + p2.y);
+    let dx = p1.x;
+    let dy = p1.y;
+
     for step in 1..=steps {
-      let t = step as f32 / steps as f32;
-      builder.line_to(
-        catmull_rom(prev.x, curr.x, next.x, after.x, t),
-        catmull_rom(prev.y, curr.y, next.y, after.y, t),
-      );
+      let t = step as f32 * inv_steps;
+      let x = ((ax * t + bx) * t + cx) * t + dx;
+      let y = ((ay * t + by) * t + cy) * t + dy;
+      builder.line_to(x, y);
     }
   }
   builder.finish()
-}
-
-fn catmull_rom(p0: f32, p1: f32, p2: f32, p3: f32, t: f32) -> f32 {
-  let t2 = t * t;
-  let t3 = t2 * t;
-  0.5
-    * ((2.0 * p1)
-      + (-p0 + p2) * t
-      + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2
-      + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3)
 }
 
 fn open_builder(points: &[Point]) -> Option<PathBuilder> {
@@ -129,37 +161,25 @@ pub fn arrow_head(
   }
   let (ux, uy) = (dx / length, dy / length);
   let spread = size * 0.45;
-  let base = [
-    head.x - ux * size - uy * spread,
-    head.y - uy * size + ux * spread,
-  ];
-  let tip = [
-    head.x - ux * size + uy * spread,
-    head.y - uy * size - ux * spread,
-  ];
-  polygon_fill(
-    pm,
-    &[
-      head,
-      Point::new(base[0], base[1]),
-      Point::new(tip[0], tip[1]),
-    ],
-    color,
-    alpha,
-  );
-}
+  let base_x = head.x - ux * size - uy * spread;
+  let base_y = head.y - uy * size + ux * spread;
+  let tip_x = head.x - ux * size + uy * spread;
+  let tip_y = head.y - uy * size - ux * spread;
 
-fn polygon_fill(pm: &mut Pixmap, points: &[Point], color: [u8; 3], alpha: u8) {
-  let Some(path) = closed_path(points) else {
-    return;
-  };
-  pm.fill_path(
-    &path,
-    &paint(color[0], color[1], color[2], alpha),
-    FillRule::Winding,
-    Transform::identity(),
-    None,
-  );
+  let mut builder = PathBuilder::new();
+  builder.move_to(head.x, head.y);
+  builder.line_to(base_x, base_y);
+  builder.line_to(tip_x, tip_y);
+  builder.close();
+  if let Some(path) = builder.finish() {
+    pm.fill_path(
+      &path,
+      &paint(color[0], color[1], color[2], alpha),
+      FillRule::Winding,
+      Transform::identity(),
+      None,
+    );
+  }
 }
 
 pub fn rect_stroke(
@@ -205,7 +225,12 @@ pub fn dashed_rect(pm: &mut Pixmap, rect: GeoRect, rgb: [u8; 3], width: f32) {
   let mut stroke = stroke(width);
   stroke.line_cap = LineCap::Butt;
   stroke.line_join = LineJoin::Miter;
-  stroke.dash = StrokeDash::new(vec![3.0, 3.0], 0.0);
+  static DASH: OnceLock<StrokeDash> = OnceLock::new();
+  stroke.dash = Some(
+    DASH
+      .get_or_init(|| StrokeDash::new(vec![3.0, 3.0], 0.0).unwrap())
+      .clone(),
+  );
   pm.stroke_path(
     &path,
     &paint(rgb[0], rgb[1], rgb[2], 255),
@@ -339,7 +364,7 @@ fn tinted_sprite(icon: Icon, color: [u8; 3], box_size: f32) -> Rc<Pixmap> {
           Transform::from_scale(scale, scale),
           None,
         );
-        for pixel in tinted.data_mut().chunks_mut(4) {
+        for pixel in tinted.data_mut().as_chunks_mut::<4>().0 {
           let a = pixel[3] as u32;
           pixel[0] = ((color[0] as u32 * a) / 255) as u8;
           pixel[1] = ((color[1] as u32 * a) / 255) as u8;

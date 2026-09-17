@@ -21,7 +21,7 @@ use winit::{
   application::ApplicationHandler,
   dpi::{PhysicalPosition, PhysicalSize},
   event::{ElementState, KeyEvent, MouseButton, WindowEvent},
-  event_loop::ActiveEventLoop,
+  event_loop::{ActiveEventLoop, ControlFlow},
   keyboard::{Key, ModifiersState, NamedKey},
   platform::windows::WindowAttributesExtWindows,
   raw_window_handle::{HasWindowHandle, RawWindowHandle},
@@ -99,7 +99,7 @@ struct Session {
   sizes: [f32; 7],
   hint: Option<String>,
   hint_until: Option<Instant>,
-  hint_scheduled: bool,
+  current_cursor: CursorIcon,
 }
 
 #[derive(Default)]
@@ -109,6 +109,23 @@ pub struct App {
 
 impl ApplicationHandler<Trigger> for App {
   fn resumed(&mut self, _event_loop: &ActiveEventLoop) {}
+
+  fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+    if let Some(session) = self.session.as_mut() {
+      if let Some(until) = session.hint_until {
+        let now = Instant::now();
+        if now >= until {
+          session.hint = None;
+          session.hint_until = None;
+          session.window.request_redraw();
+        } else {
+          event_loop.set_control_flow(ControlFlow::WaitUntil(until));
+        }
+      } else {
+        event_loop.set_control_flow(ControlFlow::Wait);
+      }
+    }
+  }
 
   fn window_event(
     &mut self,
@@ -318,11 +335,18 @@ impl Session {
       sizes,
       hint: None,
       hint_until: None,
-      hint_scheduled: false,
+      current_cursor: CursorIcon::default(),
     };
     session.window.set_visible(true);
     session.render();
     Ok(session)
+  }
+
+  fn update_cursor(&mut self, icon: CursorIcon) {
+    if self.current_cursor != icon {
+      self.current_cursor = icon;
+      self.window.set_cursor(icon);
+    }
   }
 
   fn render(&mut self) {
@@ -330,7 +354,6 @@ impl Session {
       if Instant::now() >= until {
         self.hint = None;
         self.hint_until = None;
-        self.hint_scheduled = false;
       }
     }
     render::build(
@@ -401,18 +424,19 @@ impl Session {
           if let Some(sel) = self.selection {
             match hit_handle(sel, p, HANDLE_SLOP) {
               Some(_) => {
-                self.window.set_cursor(resize_cursor(sel, p));
+                let cursor = resize_cursor(sel, p);
+                self.update_cursor(cursor);
               }
               None if sel.contains(p) => {
-                self.window.set_cursor(CursorIcon::Move);
+                self.update_cursor(CursorIcon::Move);
               }
               None => {
-                self.window.set_cursor(CursorIcon::default());
+                self.update_cursor(CursorIcon::default());
               }
             }
           }
         } else {
-          self.window.set_cursor(CursorIcon::default());
+          self.update_cursor(CursorIcon::default());
         }
       }
       Mode::Rubber(anchor) => {
@@ -473,18 +497,26 @@ impl Session {
     let color = active_color(self.palette_index);
     let width = self.size(tool);
     match tool {
-      Tool::Pen => Shape::Stroke {
-        points: vec![p],
-        color,
-        width,
-        marker: false,
-      },
-      Tool::Marker => Shape::Stroke {
-        points: vec![p],
-        color,
-        width,
-        marker: true,
-      },
+      Tool::Pen => {
+        let mut points = Vec::with_capacity(64);
+        points.push(p);
+        Shape::Stroke {
+          points,
+          color,
+          width,
+          marker: false,
+        }
+      }
+      Tool::Marker => {
+        let mut points = Vec::with_capacity(64);
+        points.push(p);
+        Shape::Stroke {
+          points,
+          color,
+          width,
+          marker: true,
+        }
+      }
       Tool::Line => Shape::Line {
         from: p,
         to: p,
@@ -650,22 +682,7 @@ impl Session {
     }
     self.hint = Some(format_size(next));
     self.hint_until = Some(Instant::now() + HINT_DURATION);
-    self.schedule_hint_clear();
     self.window.request_redraw();
-  }
-
-  fn schedule_hint_clear(&mut self) {
-    if self.hint_scheduled {
-      return;
-    }
-    self.hint_scheduled = true;
-    let window = self.window.clone();
-    let _ = thread::Builder::new()
-      .name("slightshot-hint".to_string())
-      .spawn(move || {
-        thread::sleep(HINT_DURATION);
-        window.request_redraw();
-      });
   }
 }
 

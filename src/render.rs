@@ -64,6 +64,7 @@ pub enum Hotspot {
   Action(usize),
 }
 
+#[inline(always)]
 fn button(
   command: Command,
   icon: draw::Icon,
@@ -275,15 +276,35 @@ pub fn paint(pm: &mut Pixmap, scene: &Scene) {
   }
 }
 
-pub fn dimmed_copy(frame: &Pixmap) -> Pixmap {
-  let mut pm = frame.clone();
-  let keep = u32::from(255 - DIM_ALPHA);
-  for pixel in pm.data_mut().as_chunks_mut::<4>().0 {
-    for channel in &mut pixel[..3] {
-      *channel = ((u32::from(*channel) * keep + 127) / 255) as u8;
-    }
+const DIM_LUT: [u8; 256] = {
+  let keep = 255 - DIM_ALPHA as u32;
+  let mut lut = [0u8; 256];
+  let mut i = 0;
+  while i < 256 {
+    lut[i] = ((i as u32 * keep + 127) / 255) as u8;
+    i += 1;
   }
-  pm
+  lut
+};
+
+pub fn dimmed_copy(frame: &Pixmap) -> Pixmap {
+  let src = frame.data();
+  let mut data = vec![0u8; src.len()];
+
+  let dst_chunks = data.as_chunks_mut::<4>().0;
+  let src_chunks = src.as_chunks::<4>().0;
+
+  for (dst_px, src_px) in dst_chunks.iter_mut().zip(src_chunks) {
+    dst_px[0] = DIM_LUT[src_px[0] as usize];
+    dst_px[1] = DIM_LUT[src_px[1] as usize];
+    dst_px[2] = DIM_LUT[src_px[2] as usize];
+    dst_px[3] = src_px[3];
+  }
+
+  let width = frame.width();
+  let height = frame.height();
+  Pixmap::from_vec(data, tiny_skia::IntSize::from_wh(width, height).unwrap())
+    .expect("valid frame dimensions")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -300,10 +321,14 @@ fn blit(
   height: usize,
 ) {
   let row_bytes = width * 4;
-  for row in 0..height {
-    let src = ((source_y + row) * source_stride_px + source_x) * 4;
-    let dst = ((dest_y + row) * dest_stride_px + dest_x) * 4;
+  let src_stride_bytes = source_stride_px * 4;
+  let dst_stride_bytes = dest_stride_px * 4;
+  let mut src = (source_y * source_stride_px + source_x) * 4;
+  let mut dst = (dest_y * dest_stride_px + dest_x) * 4;
+  for _ in 0..height {
     dest[dst..dst + row_bytes].copy_from_slice(&source[src..src + row_bytes]);
+    src += src_stride_bytes;
+    dst += dst_stride_bytes;
   }
 }
 
@@ -363,7 +388,7 @@ pub fn flatten(
   Shot {
     width: width as u32,
     height: height as u32,
-    rgba: layer.data().to_vec(),
+    rgba: layer.take(),
   }
 }
 
@@ -373,8 +398,6 @@ pub(crate) fn ink(
   origin: Point,
   engine: &TextEngine,
 ) {
-  let is_zero = origin.x == 0.0 && origin.y == 0.0;
-  let rel = |p: &Point| Point::new(p.x - origin.x, p.y - origin.y);
   match shape {
     Shape::Stroke {
       points,
@@ -383,12 +406,7 @@ pub(crate) fn ink(
       marker,
     } => {
       let alpha = if *marker { MARKER_ALPHA } else { 255 };
-      if is_zero {
-        draw::polyline(pm, points, *color, *width, alpha);
-      } else {
-        let mapped: Vec<Point> = points.iter().map(rel).collect();
-        draw::polyline(pm, &mapped, *color, *width, alpha);
-      }
+      draw::polyline_offset(pm, points, *color, *width, alpha, origin);
     }
     Shape::Line {
       from,
@@ -397,7 +415,8 @@ pub(crate) fn ink(
       width,
       arrow,
     } => {
-      let (start, end) = (rel(from), rel(to));
+      let start = Point::new(from.x - origin.x, from.y - origin.y);
+      let end = Point::new(to.x - origin.x, to.y - origin.y);
       if *arrow {
         let size = (*width * 3.5).max(6.0);
         let (dx, dy) = (end.x - start.x, end.y - start.y);
@@ -443,7 +462,10 @@ fn draw_handles(pm: &mut Pixmap, sel: Rect) {
 }
 
 fn draw_badge(pm: &mut Pixmap, sel: Rect, bounds: Rect, engine: &TextEngine) {
-  let label = format!("{}x{}", sel.w.round() as i64, sel.h.round() as i64);
+  let mut label = String::with_capacity(16);
+  use std::fmt::Write;
+  let _ = write!(label, "{}x{}", sel.w.round() as i64, sel.h.round() as i64);
+
   let text_width = engine.width(&label, BADGE_TEXT);
   let pad = 6.0;
   let box_w = text_width + pad * 2.0;

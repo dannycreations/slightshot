@@ -79,24 +79,32 @@ impl TextEngine {
 
   fn raster(&self, ch: char, size: f32) -> Rc<Glyph> {
     let key = (ch, size.to_bits());
-    let mut cache = self.cache.borrow_mut();
-    if let Some(glyph) = cache.get(&key) {
+    if let Some(glyph) = self.cache.borrow().get(&key) {
       return Rc::clone(glyph);
     }
-    let font = self
-      .font
-      .as_ref()
-      .expect("TextEngine::raster called before a font was loaded");
+    let Some(font) = self.font.as_ref() else {
+      return Rc::new(Glyph {
+        metrics: Metrics::default(),
+        coverage: Vec::new(),
+      });
+    };
     let (metrics, coverage) = font.rasterize(ch, size);
     let glyph = Rc::new(Glyph { metrics, coverage });
-    cache.insert(key, Rc::clone(&glyph));
+    self.cache.borrow_mut().insert(key, Rc::clone(&glyph));
     glyph
   }
 
   pub fn width(&self, text: &str, size: f32) -> f32 {
     let mut total = 0.0;
     for ch in text.chars() {
-      total += self.raster(ch, size).metrics.advance_width;
+      let key = (ch, size.to_bits());
+      if let Some(glyph) = self.cache.borrow().get(&key) {
+        total += glyph.metrics.advance_width;
+        continue;
+      }
+      if let Some(font) = &self.font {
+        total += font.metrics(ch, size).advance_width;
+      }
     }
     total
   }
@@ -110,23 +118,47 @@ impl TextEngine {
     glyph: &Glyph,
     rgb: [u8; 3],
   ) {
-    let (gw, gh) = (glyph.metrics.width, glyph.metrics.height);
-    let mut i = 0;
-    for row in 0..gh as i32 {
-      for col in 0..gw as i32 {
-        let px = gx + col;
-        let py = gy + row;
-        if px >= 0 && px < pw && py >= 0 && py < ph {
-          let a = glyph.coverage[i] as u32;
-          let inv = 255 - a;
-          let di = ((py * pw + px) * 4) as usize;
-          for c in 0..3 {
-            let base = pm[di + c] as u32;
-            pm[di + c] = ((base * inv + rgb[c] as u32 * a) / 255) as u8;
+    let gw = glyph.metrics.width as i32;
+    let gh = glyph.metrics.height as i32;
+    if gw <= 0
+      || gh <= 0
+      || gx >= pw
+      || gy >= ph
+      || gx + gw <= 0
+      || gy + gh <= 0
+    {
+      return;
+    }
+
+    let col_start = (-gx).max(0);
+    let col_end = gw.min(pw - gx);
+    let row_start = (-gy).max(0);
+    let row_end = gh.min(ph - gy);
+
+    for row in row_start..row_end {
+      let py = gy + row;
+      let cov_row_offset = (row * gw) as usize;
+      let mut di = ((py * pw + (gx + col_start)) * 4) as usize;
+
+      for col in col_start..col_end {
+        let a = glyph.coverage[cov_row_offset + col as usize] as u32;
+        if a > 0 {
+          if a == 255 {
+            pm[di] = rgb[0];
+            pm[di + 1] = rgb[1];
+            pm[di + 2] = rgb[2];
+            pm[di + 3] = 255;
+          } else {
+            let inv = 255 - a;
+            pm[di] = ((pm[di] as u32 * inv + rgb[0] as u32 * a) / 255) as u8;
+            pm[di + 1] =
+              ((pm[di + 1] as u32 * inv + rgb[1] as u32 * a) / 255) as u8;
+            pm[di + 2] =
+              ((pm[di + 2] as u32 * inv + rgb[2] as u32 * a) / 255) as u8;
+            pm[di + 3] = (pm[di + 3] as u32 + a).min(255) as u8;
           }
-          pm[di + 3] = (pm[di + 3] as u32 + a).min(255) as u8;
         }
-        i += 1;
+        di += 4;
       }
     }
   }

@@ -7,6 +7,17 @@ const ENDPOINT: &str = "https://api.imgur.com/3/image";
 const CLIENT_ID_VAR: &str = "IMGUR_CLIENT_ID";
 const BOUNDARY: &str = "slightshot-multipart-7f3a";
 
+const MULTIPART_HEADER: &[u8] = b"--slightshot-multipart-7f3a\r\n\
+Content-Disposition: form-data; name=\"type\"\r\n\
+\r\n\
+file\r\n\
+--slightshot-multipart-7f3a\r\n\
+Content-Disposition: form-data; name=\"image\"; filename=\"capture.png\"\r\n\
+Content-Type: image/png\r\n\
+\r\n";
+
+const MULTIPART_FOOTER: &[u8] = b"\r\n--slightshot-multipart-7f3a--\r\n";
+
 pub fn upload(png: &[u8]) -> Result<String> {
   let client_id = env::var(CLIENT_ID_VAR).with_context(|| {
     format!(
@@ -38,22 +49,12 @@ fn request(client_id: &str, png: &[u8]) -> Result<String> {
 }
 
 fn multipart(png: &[u8]) -> Vec<u8> {
-  let mut body = Vec::with_capacity(png.len() + 256);
-  body.extend_from_slice(
-    format!(
-      "--{BOUNDARY}\r\n\
-Content-Disposition: form-data; name=\"type\"\r\n\
-\r\n\
-file\r\n\
---{BOUNDARY}\r\n\
-Content-Disposition: form-data; name=\"image\"; filename=\"capture.png\"\r\n\
-Content-Type: image/png\r\n\
-\r\n"
-    )
-    .as_bytes(),
+  let mut body = Vec::with_capacity(
+    MULTIPART_HEADER.len() + png.len() + MULTIPART_FOOTER.len(),
   );
+  body.extend_from_slice(MULTIPART_HEADER);
   body.extend_from_slice(png);
-  body.extend_from_slice(format!("\r\n--{BOUNDARY}--\r\n").as_bytes());
+  body.extend_from_slice(MULTIPART_FOOTER);
   body
 }
 
