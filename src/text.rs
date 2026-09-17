@@ -15,7 +15,7 @@ struct Glyph {
 
 #[derive(Default)]
 pub struct TextEngine {
-  fonts: Vec<fontdue::Font>,
+  font: Option<Font>,
   cache: RefCell<HashMap<(char, u32), Rc<Glyph>>>,
 }
 
@@ -38,7 +38,7 @@ impl TextEngine {
         anyhow!("{} is not a usable font: {reason}", path.display())
       })?;
       return Ok(Self {
-        fonts: vec![font],
+        font: Some(font),
         cache: RefCell::new(HashMap::new()),
       });
     }
@@ -69,9 +69,7 @@ impl TextEngine {
           ph,
           left.round() as i32,
           top.round() as i32,
-          &glyph.coverage,
-          m.width,
-          m.height,
+          &glyph,
           rgb,
         );
       }
@@ -85,7 +83,11 @@ impl TextEngine {
     if let Some(glyph) = cache.get(&key) {
       return Rc::clone(glyph);
     }
-    let (metrics, coverage) = self.fonts[0].rasterize(ch, size);
+    let font = self
+      .font
+      .as_ref()
+      .expect("TextEngine::raster called before a font was loaded");
+    let (metrics, coverage) = font.rasterize(ch, size);
     let glyph = Rc::new(Glyph { metrics, coverage });
     cache.insert(key, Rc::clone(&glyph));
     glyph
@@ -99,25 +101,23 @@ impl TextEngine {
     total
   }
 
-  #[allow(clippy::too_many_arguments)]
   fn blend(
     pm: &mut [u8],
     pw: i32,
     ph: i32,
     gx: i32,
     gy: i32,
-    coverage: &[u8],
-    gw: usize,
-    gh: usize,
+    glyph: &Glyph,
     rgb: [u8; 3],
   ) {
+    let (gw, gh) = (glyph.metrics.width, glyph.metrics.height);
     let mut i = 0;
     for row in 0..gh as i32 {
       for col in 0..gw as i32 {
         let px = gx + col;
         let py = gy + row;
         if px >= 0 && px < pw && py >= 0 && py < ph {
-          let a = coverage[i] as f32 / 255.0;
+          let a = glyph.coverage[i] as f32 / 255.0;
           let di = ((py * pw + px) * 4) as usize;
           for c in 0..3 {
             let base = pm[di + c] as f32;
@@ -139,7 +139,7 @@ mod tests {
   #[test]
   fn empty_string_has_zero_width_without_loading_a_font() {
     let engine = TextEngine {
-      fonts: Vec::new(),
+      font: None,
       cache: RefCell::new(HashMap::new()),
     };
     assert_eq!(engine.width("", 20.0), 0.0);

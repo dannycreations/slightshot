@@ -49,6 +49,18 @@ impl Tool {
     !matches!(self, Tool::Select)
   }
 
+  pub fn label(self) -> &'static str {
+    match self {
+      Tool::Select => "Select",
+      Tool::Pen => "Pen",
+      Tool::Line => "Line",
+      Tool::Arrow => "Arrow",
+      Tool::Box => "Rectangle",
+      Tool::Marker => "Marker",
+      Tool::Label => "Text",
+    }
+  }
+
   pub fn all() -> &'static [Tool] {
     &[
       Tool::Select,

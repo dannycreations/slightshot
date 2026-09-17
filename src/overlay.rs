@@ -43,9 +43,23 @@ use crate::{
 
 const HINT_DURATION: Duration = Duration::from_millis(800);
 
-pub struct Outcome {
-  pub deliverable: Deliverable,
-  pub shot: Shot,
+pub enum Outcome {
+  Close,
+  Deliver {
+    deliverable: Deliverable,
+    shot: Shot,
+  },
+}
+
+#[derive(Default)]
+enum Mode {
+  #[default]
+  Idle,
+  Rubber(f32, f32),
+  Draw(Shape, Point),
+  Move(f32, f32),
+  Resize(Handle, Rect),
+  Type(String, Point),
 }
 
 impl Mode {
@@ -59,17 +73,6 @@ impl Mode {
   fn shows_chrome(&self) -> bool {
     matches!(self, Mode::Idle | Mode::Draw(_, _) | Mode::Type(_, _))
   }
-}
-
-#[derive(Default)]
-enum Mode {
-  #[default]
-  Idle,
-  Rubber(f32, f32),
-  Draw(Shape, Point),
-  Move(f32, f32),
-  Resize(Handle, Rect),
-  Type(String, Point),
 }
 
 type Surface = SoftSurface<Arc<Window>, Arc<Window>>;
@@ -91,7 +94,6 @@ struct Session {
   hover: Option<Hotspot>,
   chrome: Chrome,
   screen: Vec<u32>,
-  pending: Option<Outcome>,
   modifiers: ModifiersState,
   sizes: HashMap<Tool, f32>,
   hint: Option<String>,
@@ -124,16 +126,16 @@ impl ApplicationHandler<Trigger> for App {
         state: ElementState::Pressed,
         button: MouseButton::Left,
         ..
-      } => session.mouse_down(),
+      } => {
+        if let Some(outcome) = session.mouse_down() {
+          self.finish(outcome);
+        }
+      }
       WindowEvent::MouseInput {
         state: ElementState::Released,
         button: MouseButton::Left,
         ..
-      } => {
-        if let Some(outcome) = session.mouse_up() {
-          self.finish(outcome);
-        }
-      }
+      } => session.mouse_up(),
       WindowEvent::KeyboardInput {
         event:
           KeyEvent {
@@ -218,11 +220,13 @@ impl ApplicationHandler<Trigger> for App {
 impl App {
   fn finish(&mut self, outcome: Outcome) {
     self.session = None;
-    thread::spawn(move || {
-      match actions::execute(outcome.deliverable, &outcome.shot) {
-        Ok(summary) => println!("slightshot: {summary}"),
-        Err(error) => eprintln!("slightshot: {error:#}"),
-      }
+    let Outcome::Deliver { deliverable, shot } = outcome else {
+      // Closing has nothing to deliver, so there is nothing to run.
+      return;
+    };
+    thread::spawn(move || match actions::execute(deliverable, &shot) {
+      Ok(summary) => println!("slightshot: {summary}"),
+      Err(error) => eprintln!("slightshot: {error:#}"),
     });
   }
 }
@@ -303,15 +307,8 @@ impl Session {
         actions: Vec::new(),
       },
       screen: Vec::new(),
-      pending: None,
       modifiers: ModifiersState::default(),
-      sizes: {
-        let mut sizes = HashMap::new();
-        for tool in Tool::all() {
-          sizes.insert(*tool, tool.default_size());
-        }
-        sizes
-      },
+      sizes: Tool::all().iter().map(|&t| (t, t.default_size())).collect(),
       hint: None,
       hint_until: None,
     };
@@ -384,7 +381,7 @@ impl Session {
     if self.screen.len() != w * h {
       self.screen = vec![0u32; w * h];
     }
-    pack_region(self.frame.data(), &mut self.screen, w, None);
+    pack_rgba(self.frame.data(), &mut self.screen);
     buffer.copy_from_slice(&self.screen);
     let _ = buffer.present();
   }
@@ -455,98 +452,76 @@ impl Session {
     }
   }
 
-  fn mouse_down(&mut self) {
+  fn mouse_down(&mut self) -> Option<Outcome> {
     let p = self.cursor;
     if let Some(sel) = self.selection {
       if let Some(hotspot) = render::hotspot_at(&self.chrome, p) {
-        self.activate(hotspot);
-        return;
+        return self.activate(hotspot);
       }
       if self.tool == Tool::Select {
         if let Some(handle) = hit_handle(sel, p, HANDLE_SLOP) {
           self.mode = Mode::Resize(handle, sel);
-          return;
+          return None;
         }
         if sel.contains(p) {
           self.mode = Mode::Move(p.x, p.y);
-          return;
+          return None;
         }
       }
     }
-    match self.tool {
+    self.mode = match self.tool {
       Tool::Select => {
         self.selection = None;
-        self.mode = Mode::Rubber(p.x, p.y);
-        self.window.request_redraw();
+        Mode::Rubber(p.x, p.y)
       }
-      Tool::Label => {
-        self.mode = Mode::Type(String::new(), p);
-        self.window.request_redraw();
-      }
-      Tool::Pen => {
-        self.mode = Mode::Draw(
-          Shape::Freehand {
-            points: vec![p],
-            color: active_color(self.palette_index),
-            width: self.size(Tool::Pen),
-          },
-          p,
-        );
-        self.window.request_redraw();
-      }
-      Tool::Marker => {
-        self.mode = Mode::Draw(
-          Shape::Marker {
-            points: vec![p],
-            color: active_color(self.palette_index),
-            width: self.size(Tool::Marker),
-          },
-          p,
-        );
-        self.window.request_redraw();
-      }
-      Tool::Line => {
-        self.mode = Mode::Draw(
-          Shape::Segment {
-            from: p,
-            to: p,
-            color: active_color(self.palette_index),
-            width: self.size(Tool::Line),
-          },
-          p,
-        );
-        self.window.request_redraw();
-      }
-      Tool::Arrow => {
-        self.mode = Mode::Draw(
-          Shape::Arrow {
-            tail: p,
-            head: p,
-            color: active_color(self.palette_index),
-            width: self.size(Tool::Arrow),
-          },
-          p,
-        );
-        self.window.request_redraw();
-      }
-      Tool::Box => {
-        self.mode = Mode::Draw(
-          Shape::Outline {
-            rect: Rect::new(p.x, p.y, 0.0, 0.0),
-            color: active_color(self.palette_index),
-            width: self.size(Tool::Box),
-          },
-          p,
-        );
-        self.window.request_redraw();
+      Tool::Label => Mode::Type(String::new(), p),
+      tool => Mode::Draw(self.new_shape(tool, p), p),
+    };
+    self.window.request_redraw();
+    None
+  }
+
+  fn new_shape(&self, tool: Tool, p: Point) -> Shape {
+    let color = active_color(self.palette_index);
+    let width = self.size(tool);
+    match tool {
+      Tool::Pen => Shape::Freehand {
+        points: vec![p],
+        color,
+        width,
+      },
+      Tool::Marker => Shape::Marker {
+        points: vec![p],
+        color,
+        width,
+      },
+      Tool::Line => Shape::Segment {
+        from: p,
+        to: p,
+        color,
+        width,
+      },
+      Tool::Arrow => Shape::Arrow {
+        tail: p,
+        head: p,
+        color,
+        width,
+      },
+      Tool::Box => Shape::Outline {
+        rect: Rect::new(p.x, p.y, 0.0, 0.0),
+        color,
+        width,
+      },
+      Tool::Select | Tool::Label => {
+        unreachable!("Select and Label are handled directly in mouse_down")
       }
     }
   }
 
-  fn activate(&mut self, hotspot: Hotspot) {
+  fn activate(&mut self, hotspot: Hotspot) -> Option<Outcome> {
     let command = match hotspot {
-      Hotspot::Tool(i) => self.button_command(i, true),
-      Hotspot::Action(i) => self.button_command(i, false),
+      Hotspot::Tool(i) => self.chrome.tools[i].command,
+      Hotspot::Action(i) => self.chrome.actions[i].command,
     };
     match command {
       render::Command::Tool(tool) => {
@@ -555,41 +530,31 @@ impl Session {
         } else {
           tool
         };
+        None
       }
       render::Command::NextColor => {
-        self.palette_index = (self.palette_index + 1) % PALETTE.len()
+        self.palette_index = (self.palette_index + 1) % PALETTE.len();
+        None
       }
       render::Command::Undo => {
         if self.history.undo() {
           self.window.request_redraw();
         }
+        None
       }
-      render::Command::Deliver(deliverable) => {
-        if let Some(outcome) = self.deliver(deliverable) {
-          self.pending = Some(outcome);
-        }
-      }
+      render::Command::Close => Some(Outcome::Close),
+      render::Command::Deliver(deliverable) => self.deliver(deliverable),
     }
   }
 
-  fn button_command(&self, index: usize, tools: bool) -> render::Command {
-    let button = if tools {
-      &self.chrome.tools[index]
-    } else {
-      &self.chrome.actions[index]
-    };
-    button.command
-  }
-
   fn deliver(&self, deliverable: Deliverable) -> Option<Outcome> {
-    render::deliverable_region(self.selection).map(|sel| {
-      let shot =
-        render::flatten(&self.canvas, sel, self.history.shapes(), &self.engine);
-      Outcome { deliverable, shot }
-    })
+    let sel = render::deliverable_region(self.selection)?;
+    let shot =
+      render::flatten(&self.canvas, sel, self.history.shapes(), &self.engine);
+    Some(Outcome::Deliver { deliverable, shot })
   }
 
-  fn mouse_up(&mut self) -> Option<Outcome> {
+  fn mouse_up(&mut self) {
     match std::mem::replace(&mut self.mode, Mode::Idle) {
       Mode::Rubber(_, _) => {
         self.selection = render::deliverable_region(self.selection);
@@ -605,7 +570,6 @@ impl Session {
       Mode::Idle => {}
     }
     self.window.request_redraw();
-    self.pending.take()
   }
 
   fn type_char(&mut self, ch: &str) {
@@ -682,31 +646,12 @@ impl Session {
   }
 }
 
-fn pack_region(rgba: &[u8], out: &mut [u32], w: usize, region: Option<Rect>) {
-  let h = out.len() / w;
-  let (x0, y0, x1, y1) = match region {
-    None => (0, 0, w as i32, h as i32),
-    Some(r) => {
-      let x0 = r.x.floor().max(0.0) as i32;
-      let y0 = r.y.floor().max(0.0) as i32;
-      let x1 = (r.right().ceil() as i32).min(w as i32);
-      let y1 = (r.bottom().ceil() as i32).min(h as i32);
-      (x0, y0, x1, y1)
-    }
-  };
-  if x1 <= x0 || y1 <= y0 {
-    return;
-  }
-  for y in y0..y1 {
-    let row = y as usize * w;
-    for x in x0..x1 {
-      let p = (row + x as usize) * 4;
-      let pixel = &rgba[p..p + 4];
-      out[row + x as usize] = (0xFFu32 << 24)
-        | ((pixel[0] as u32) << 16)
-        | ((pixel[1] as u32) << 8)
-        | (pixel[2] as u32);
-    }
+fn pack_rgba(rgba: &[u8], out: &mut [u32]) {
+  for (chunk, pixel) in rgba.as_chunks::<4>().0.iter().zip(out.iter_mut()) {
+    *pixel = (0xFFu32 << 24)
+      | ((chunk[0] as u32) << 16)
+      | ((chunk[1] as u32) << 8)
+      | (chunk[2] as u32);
   }
 }
 
@@ -800,38 +745,11 @@ mod tests {
   }
 
   #[test]
-  fn pack_region_scopes_work_to_the_given_rect() {
-    let w = 4usize;
-    let h = 2usize;
-    let mut rgba = vec![0u8; w * h * 4];
-    for (i, px) in rgba.chunks_mut(4).enumerate() {
-      px[0] = (i * 7) as u8;
-      px[1] = (i * 11) as u8;
-      px[2] = (i * 13) as u8;
-      px[3] = 255;
-    }
-    let mut full = vec![0u32; w * h];
-    pack_region(&rgba, &mut full, w, None);
-
-    let mut scoped = vec![0u32; w * h];
-    pack_region(
-      &rgba,
-      &mut scoped,
-      w,
-      Some(GeoRect::new(0.0, 1.0, 4.0, 1.0)),
-    );
-    for y in 0..h {
-      for x in 0..w {
-        let idx = y * w + x;
-        if y == 1 {
-          assert_eq!(scoped[idx], full[idx], "row 1 must be packed");
-        } else {
-          assert_eq!(
-            scoped[idx], 0,
-            "pixels outside the region must stay untouched"
-          );
-        }
-      }
-    }
+  fn pack_rgba_converts_straight_rgba_rows_to_argb_words() {
+    let rgba = [10u8, 20, 30, 0, 40, 50, 60, 99];
+    let mut out = [0u32; 2];
+    pack_rgba(&rgba, &mut out);
+    assert_eq!(out[0], (0xFFu32 << 24) | (10 << 16) | (20 << 8) | 30);
+    assert_eq!(out[1], (0xFFu32 << 24) | (40 << 16) | (50 << 8) | 60);
   }
 }

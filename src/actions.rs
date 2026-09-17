@@ -18,7 +18,16 @@ pub enum Deliverable {
   Upload,
   Copy,
   Save,
-  Close,
+}
+
+impl Deliverable {
+  pub fn label(self) -> &'static str {
+    match self {
+      Deliverable::Upload => "Upload",
+      Deliverable::Copy => "Copy",
+      Deliverable::Save => "Save",
+    }
+  }
 }
 
 pub struct Shot {
@@ -61,7 +70,6 @@ pub fn execute(deliverable: Deliverable, shot: &Shot) -> Result<String> {
       encode_png(shot, &path)?;
       Ok(format!("saved {}", path.display()))
     }
-    Deliverable::Close => Ok(String::new()),
   }
 }
 

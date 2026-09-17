@@ -18,12 +18,11 @@ fn paint(r: u8, g: u8, b: u8, a: u8) -> Paint<'static> {
   }
 }
 
-fn stroke(width: f32, dash: Option<f32>) -> Stroke {
+fn stroke(width: f32) -> Stroke {
   Stroke {
     width,
     line_cap: LineCap::Round,
     line_join: LineJoin::Round,
-    dash: dash.and_then(|length| StrokeDash::new(vec![length, length], 0.0)),
     ..Stroke::default()
   }
 }
@@ -41,7 +40,7 @@ pub fn polyline(
   pm.stroke_path(
     &path,
     &paint(rgb[0], rgb[1], rgb[2], alpha),
-    &stroke(width, None),
+    &stroke(width),
     Transform::identity(),
     None,
   );
@@ -175,7 +174,7 @@ pub fn rect_stroke(
   pm.stroke_path(
     &path,
     &paint(rgb[0], rgb[1], rgb[2], alpha),
-    &stroke(width, None),
+    &stroke(width),
     Transform::identity(),
     None,
   );
@@ -197,7 +196,7 @@ pub fn dashed_rect(pm: &mut Pixmap, rect: GeoRect, rgb: [u8; 3], width: f32) {
   let Some(path) = closed_path(&corners(rect)) else {
     return;
   };
-  let mut stroke = stroke(width, None);
+  let mut stroke = stroke(width);
   stroke.line_cap = LineCap::Butt;
   stroke.line_join = LineJoin::Miter;
   stroke.dash = StrokeDash::new(vec![3.0, 3.0], 0.0);
@@ -265,7 +264,7 @@ pub fn rounded_stroke(
   pm.stroke_path(
     &path,
     &paint(rgb[0], rgb[1], rgb[2], alpha),
-    &stroke(width, None),
+    &stroke(width),
     Transform::identity(),
     None,
   );
@@ -295,13 +294,12 @@ impl Icon {
     color: [u8; 3],
   ) {
     let tinted = tinted_sprite(self, color, box_size);
-    let sprite: &Pixmap = &tinted;
     let x = (center.x - box_size / 2.0).round() as i32;
     let y = (center.y - box_size / 2.0).round() as i32;
     pm.draw_pixmap(
       x,
       y,
-      sprite.as_ref(),
+      Pixmap::as_ref(&tinted),
       &PixmapPaint::default(),
       Transform::identity(),
       None,

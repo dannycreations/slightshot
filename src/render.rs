@@ -27,29 +27,18 @@ pub enum Command {
   Tool(Tool),
   NextColor,
   Undo,
+  Close,
   Deliver(Deliverable),
 }
 
 impl Command {
   pub fn label(self) -> &'static str {
     match self {
-      Command::Tool(tool) => match tool {
-        Tool::Select => "Select",
-        Tool::Pen => "Pen",
-        Tool::Line => "Line",
-        Tool::Arrow => "Arrow",
-        Tool::Box => "Rectangle",
-        Tool::Marker => "Marker",
-        Tool::Label => "Text",
-      },
+      Command::Tool(tool) => tool.label(),
       Command::NextColor => "Next color",
       Command::Undo => "Undo",
-      Command::Deliver(deliverable) => match deliverable {
-        Deliverable::Upload => "Upload",
-        Deliverable::Copy => "Copy",
-        Deliverable::Save => "Save",
-        Deliverable::Close => "Close",
-      },
+      Command::Close => "Close",
+      Command::Deliver(deliverable) => deliverable.label(),
     }
   }
 }
@@ -123,18 +112,18 @@ pub fn build(
     false,
   ));
 
-  let mut actions = [
+  let mut actions: Vec<Button> = [
     (Command::Deliver(Deliverable::Upload), draw::Icon::Upload),
     (Command::Deliver(Deliverable::Copy), draw::Icon::CopyImage),
     (Command::Deliver(Deliverable::Save), draw::Icon::Save),
-    (Command::Deliver(Deliverable::Close), draw::Icon::Close),
+    (Command::Close, draw::Icon::Close),
   ]
   .iter()
   .map(|&(command, icon)| {
-    let always_enabled = command == Command::Deliver(Deliverable::Close);
-    button(command, icon, ready || always_enabled, false)
+    let enabled = ready || command == Command::Close;
+    button(command, icon, enabled, false)
   })
-  .collect::<Vec<_>>();
+  .collect();
 
   if show_chrome {
     layout_vertical(&mut tools, selection, bounds);
@@ -254,15 +243,19 @@ pub fn paint(pm: &mut Pixmap, scene: &Scene) {
     if width <= 0 || height <= 0 {
       return;
     }
-    let stride = width as usize * 4;
     let px_w = pm.width() as usize;
-    let source = scene.canvas.data();
-    let target = pm.data_mut();
-    for row in 0..height as usize {
-      let offset = ((y0 as usize + row) * px_w + x0 as usize) * 4;
-      target[offset..offset + stride]
-        .copy_from_slice(&source[offset..offset + stride]);
-    }
+    blit(
+      pm.data_mut(),
+      px_w,
+      x0 as usize,
+      y0 as usize,
+      scene.canvas.data(),
+      px_w,
+      x0 as usize,
+      y0 as usize,
+      width as usize,
+      height as usize,
+    );
   }
   draw_annotations(pm, scene);
   if let Some(sel) = scene.selection {
@@ -294,48 +287,25 @@ pub fn dimmed_copy(frame: &Pixmap) -> Pixmap {
   pm
 }
 
-fn prepare_layer(
-  scratch: &mut Option<Pixmap>,
-  source: &Pixmap,
-  sel: Rect,
-  shapes: &[Shape],
-  draft: Option<&Shape>,
-  typing: Option<(Point, &str, [u8; 3], f32)>,
-  engine: &TextEngine,
-) -> Option<(Point, u32, u32)> {
-  let px_w = source.width() as i32;
-  let px_h = source.height() as i32;
-  if px_w == 0 || px_h == 0 {
-    return None;
+#[allow(clippy::too_many_arguments)]
+fn blit(
+  dest: &mut [u8],
+  dest_stride_px: usize,
+  dest_x: usize,
+  dest_y: usize,
+  source: &[u8],
+  source_stride_px: usize,
+  source_x: usize,
+  source_y: usize,
+  width: usize,
+  height: usize,
+) {
+  let row_bytes = width * 4;
+  for row in 0..height {
+    let src = ((source_y + row) * source_stride_px + source_x) * 4;
+    let dst = ((dest_y + row) * dest_stride_px + dest_x) * 4;
+    dest[dst..dst + row_bytes].copy_from_slice(&source[src..src + row_bytes]);
   }
-  let (x0, y0, width, height) = region_pixels(sel, px_w, px_h);
-  if width <= 0 || height <= 0 {
-    return None;
-  }
-  let mut layer = match scratch.take() {
-    Some(p) if p.width() == width as u32 && p.height() == height as u32 => p,
-    _ => Pixmap::new(width as u32, height as u32)?,
-  };
-  copy_region(&mut layer, source.data(), px_w as usize, x0, y0);
-  let origin = Point::new(x0 as f32, y0 as f32);
-  for shape in shapes {
-    draw_shape(&mut layer, shape, origin, engine);
-  }
-  if let Some(draft) = draft {
-    draw_shape(&mut layer, draft, origin, engine);
-  }
-  if let Some((at, buffer, ink, size)) = typing {
-    engine.draw(
-      &mut layer,
-      buffer,
-      at.x - origin.x,
-      at.y - origin.y,
-      size,
-      ink,
-    );
-  }
-  *scratch = Some(layer);
-  Some((origin, width as u32, height as u32))
 }
 
 fn draw_annotations(pm: &mut Pixmap, scene: &Scene) {
@@ -354,24 +324,6 @@ fn draw_annotations(pm: &mut Pixmap, scene: &Scene) {
   }
 }
 
-fn copy_region(
-  layer: &mut Pixmap,
-  source: &[u8],
-  source_w: usize,
-  x0: i32,
-  y0: i32,
-) {
-  let width = layer.width() as usize;
-  let height = layer.height() as usize;
-  let stride = width * 4;
-  let target = layer.data_mut();
-  for row in 0..height {
-    let from = ((y0 as usize + row) * source_w + x0 as usize) * 4;
-    target[row * stride..][..stride]
-      .copy_from_slice(&source[from..from + stride]);
-  }
-}
-
 fn region_pixels(sel: Rect, px_w: i32, px_h: i32) -> (i32, i32, i32, i32) {
   let x0 = sel.x.floor().max(0.0) as i32;
   let y0 = sel.y.floor().max(0.0) as i32;
@@ -386,16 +338,37 @@ pub fn flatten(
   shapes: &[Shape],
   text: &TextEngine,
 ) -> Shot {
-  let mut scratch = None;
-  let Some((_, w, h)) =
-    prepare_layer(&mut scratch, frame, sel, shapes, None, None, text)
-  else {
+  let px_w = frame.width() as i32;
+  let px_h = frame.height() as i32;
+  if px_w == 0 || px_h == 0 {
+    return Shot::empty();
+  }
+  let (x0, y0, width, height) = region_pixels(sel, px_w, px_h);
+  if width <= 0 || height <= 0 {
+    return Shot::empty();
+  }
+  let Some(mut layer) = Pixmap::new(width as u32, height as u32) else {
     return Shot::empty();
   };
-  let layer = scratch.as_ref().unwrap();
+  blit(
+    layer.data_mut(),
+    width as usize,
+    0,
+    0,
+    frame.data(),
+    px_w as usize,
+    x0 as usize,
+    y0 as usize,
+    width as usize,
+    height as usize,
+  );
+  let origin = Point::new(x0 as f32, y0 as f32);
+  for shape in shapes {
+    draw_shape(&mut layer, shape, origin, text);
+  }
   Shot {
-    width: w,
-    height: h,
+    width: width as u32,
+    height: height as u32,
     rgba: layer.data().to_vec(),
   }
 }
@@ -683,10 +656,10 @@ mod tests {
       (Command::Tool(Tool::Label), "Text"),
       (Command::NextColor, "Next color"),
       (Command::Undo, "Undo"),
+      (Command::Close, "Close"),
       (Command::Deliver(Deliverable::Upload), "Upload"),
       (Command::Deliver(Deliverable::Copy), "Copy"),
       (Command::Deliver(Deliverable::Save), "Save"),
-      (Command::Deliver(Deliverable::Close), "Close"),
     ];
     for (command, expected) in cases {
       assert_eq!(command.label(), expected);
@@ -718,10 +691,7 @@ mod tests {
     );
     assert!(chrome.tools.iter().all(|b| b.area.w > 0.0));
     assert!(chrome.actions.iter().all(|b| b.area.w > 0.0));
-    let close = chrome
-      .actions
-      .iter()
-      .find(|b| b.command == Command::Deliver(Deliverable::Close));
+    let close = chrome.actions.iter().find(|b| b.command == Command::Close);
     assert!(close.is_some_and(|b| b.enabled));
   }
 
