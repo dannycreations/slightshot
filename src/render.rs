@@ -52,7 +52,7 @@ pub struct Button {
   pub active: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Chrome {
   pub tools: Vec<Button>,
   pub actions: Vec<Button>,
@@ -84,56 +84,60 @@ pub fn deliverable_region(selection: Option<Rect>) -> Option<Rect> {
 }
 
 pub fn build(
+  chrome: &mut Chrome,
   selection: Option<Rect>,
   bounds: Rect,
   tool: Tool,
   history: &History,
   show_chrome: bool,
-) -> Chrome {
+) {
   let ready = deliverable_region(selection).is_some();
 
-  let mut tools: Vec<Button> = [
-    (Tool::Pen, draw::Icon::Pen),
-    (Tool::Line, draw::Icon::Line),
-    (Tool::Arrow, draw::Icon::Arrow),
-    (Tool::Box, draw::Icon::Outline),
-    (Tool::Marker, draw::Icon::Marker),
-    (Tool::Label, draw::Icon::Letter),
-  ]
-  .iter()
-  .map(|&(item, icon)| button(Command::Tool(item), icon, true, item == tool))
-  .collect();
-
-  tools.push(button(Command::NextColor, draw::Icon::Letter, true, false));
-  tools.push(button(
+  chrome.tools.clear();
+  chrome.tools.extend(
+    [
+      (Tool::Pen, draw::Icon::Pen),
+      (Tool::Line, draw::Icon::Line),
+      (Tool::Arrow, draw::Icon::Arrow),
+      (Tool::Box, draw::Icon::Outline),
+      (Tool::Marker, draw::Icon::Marker),
+      (Tool::Label, draw::Icon::Letter),
+    ]
+    .iter()
+    .map(|&(item, icon)| button(Command::Tool(item), icon, true, item == tool)),
+  );
+  chrome.tools.push(button(
+    Command::NextColor,
+    draw::Icon::Letter,
+    true,
+    false,
+  ));
+  chrome.tools.push(button(
     Command::Undo,
     draw::Icon::Undo,
     history.can_undo(),
     false,
   ));
 
-  let mut actions: Vec<Button> = [
-    (Command::Deliver(Deliverable::Upload), draw::Icon::Upload),
-    (Command::Deliver(Deliverable::Copy), draw::Icon::CopyImage),
-    (Command::Deliver(Deliverable::Save), draw::Icon::Save),
-    (Command::Close, draw::Icon::Close),
-  ]
-  .iter()
-  .map(|&(command, icon)| {
-    let enabled = ready || command == Command::Close;
-    button(command, icon, enabled, false)
-  })
-  .collect();
+  chrome.actions.clear();
+  chrome.actions.extend(
+    [
+      (Command::Deliver(Deliverable::Upload), draw::Icon::Upload),
+      (Command::Deliver(Deliverable::Copy), draw::Icon::CopyImage),
+      (Command::Deliver(Deliverable::Save), draw::Icon::Save),
+      (Command::Close, draw::Icon::Close),
+    ]
+    .iter()
+    .map(|&(command, icon)| {
+      let enabled = ready || command == Command::Close;
+      button(command, icon, enabled, false)
+    }),
+  );
 
   if show_chrome {
-    layout_vertical(&mut tools, selection, bounds);
-    layout_horizontal(&mut actions, selection, bounds);
-  } else {
-    hide_all(&mut tools);
-    hide_all(&mut actions);
+    layout_panel(&mut chrome.tools, selection, bounds, Axis::Vertical);
+    layout_panel(&mut chrome.actions, selection, bounds, Axis::Horizontal);
   }
-
-  Chrome { tools, actions }
 }
 
 pub fn hotspot_at(chrome: &Chrome, p: Point) -> Option<Hotspot> {
@@ -151,72 +155,68 @@ pub fn hotspot_at(chrome: &Chrome, p: Point) -> Option<Hotspot> {
     })
 }
 
-fn hide_all(buttons: &mut [Button]) {
-  for b in buttons {
-    b.area = Rect::default();
-  }
+#[derive(Clone, Copy)]
+enum Axis {
+  Vertical,
+  Horizontal,
 }
 
-fn layout_vertical(
+fn layout_panel(
   buttons: &mut [Button],
   selection: Option<Rect>,
   bounds: Rect,
+  axis: Axis,
 ) {
   let Some(sel) = selection else {
-    hide_all(buttons);
     return;
   };
   let count = buttons.len() as f32;
-  let height = count * BUTTON + (count - 1.0) * TOOL_GAP + PANEL_PAD * 2.0;
-  let width = BUTTON + PANEL_PAD * 2.0;
-
-  let mut x = sel.right() + 6.0;
-  if x + width > bounds.right() {
-    x = sel.right() - width - 6.0;
-  }
-  x = x.clamp(bounds.x, (bounds.right() - width).max(bounds.x));
-  let y = (sel.bottom() - height).clamp(
-    bounds.y + 4.0,
-    (bounds.bottom() - height - 4.0).max(bounds.y),
-  );
-
-  for (index, button) in buttons.iter_mut().enumerate() {
-    button.area = Rect::new(
-      x + PANEL_PAD,
-      y + PANEL_PAD + index as f32 * (BUTTON + TOOL_GAP),
-      BUTTON,
-      BUTTON,
-    );
-  }
-}
-
-fn layout_horizontal(
-  buttons: &mut [Button],
-  selection: Option<Rect>,
-  bounds: Rect,
-) {
-  let Some(sel) = selection else {
-    hide_all(buttons);
-    return;
+  let main = count * BUTTON + (count - 1.0) * TOOL_GAP + PANEL_PAD * 2.0;
+  let cross = BUTTON + PANEL_PAD * 2.0;
+  let (width, height) = match axis {
+    Axis::Vertical => (cross, main),
+    Axis::Horizontal => (main, cross),
   };
-  let count = buttons.len() as f32;
-  let width = count * BUTTON + (count - 1.0) * TOOL_GAP + PANEL_PAD * 2.0;
-  let height = BUTTON + PANEL_PAD * 2.0;
 
-  let x = (sel.right() - width).max(bounds.x);
-  let mut y = sel.bottom() + 8.0;
-  if y + height > bounds.bottom() {
-    y = sel.y - height - 8.0;
-  }
-  let y = y.clamp(bounds.y, (bounds.bottom() - height).max(bounds.y));
+  let (x, y) = match axis {
+    Axis::Vertical => {
+      let mut x = sel.right() + 6.0;
+      if x + width > bounds.right() {
+        x = sel.right() - width - 6.0;
+      }
+      x = x.clamp(bounds.x, (bounds.right() - width).max(bounds.x));
+      let y = (sel.bottom() - height).clamp(
+        bounds.y + 4.0,
+        (bounds.bottom() - height - 4.0).max(bounds.y),
+      );
+      (x, y)
+    }
+    Axis::Horizontal => {
+      let x = (sel.right() - width).max(bounds.x);
+      let mut y = sel.bottom() + 8.0;
+      if y + height > bounds.bottom() {
+        y = sel.y - height - 8.0;
+      }
+      let y = y.clamp(bounds.y, (bounds.bottom() - height).max(bounds.y));
+      (x, y)
+    }
+  };
 
   for (index, button) in buttons.iter_mut().enumerate() {
-    button.area = Rect::new(
-      x + PANEL_PAD + index as f32 * (BUTTON + TOOL_GAP),
-      y + PANEL_PAD,
-      BUTTON,
-      BUTTON,
-    );
+    button.area = match axis {
+      Axis::Vertical => Rect::new(
+        x + PANEL_PAD,
+        y + PANEL_PAD + index as f32 * (BUTTON + TOOL_GAP),
+        BUTTON,
+        BUTTON,
+      ),
+      Axis::Horizontal => Rect::new(
+        x + PANEL_PAD + index as f32 * (BUTTON + TOOL_GAP),
+        y + PANEL_PAD,
+        BUTTON,
+        BUTTON,
+      ),
+    };
   }
 }
 
@@ -318,9 +318,7 @@ fn draw_annotations(pm: &mut Pixmap, scene: &Scene) {
   }
   if let Some((at, buffer, size)) = scene.typing {
     let ink = active_color(scene.palette_index);
-    scene
-      .text
-      .draw(pm, buffer, at.x - origin.x, at.y - origin.y, size, ink);
+    scene.text.draw(pm, buffer, at.x, at.y, size, ink);
   }
 }
 
@@ -379,50 +377,46 @@ fn draw_shape(
   origin: Point,
   engine: &TextEngine,
 ) {
+  let is_zero = origin.x == 0.0 && origin.y == 0.0;
   let rel = |p: &Point| Point::new(p.x - origin.x, p.y - origin.y);
   match shape {
-    Shape::Freehand {
+    Shape::Stroke {
       points,
       color,
       width,
+      marker,
     } => {
-      let mapped: Vec<Point> = points.iter().map(rel).collect();
-      draw::polyline(pm, &mapped, *color, *width, 255);
+      let alpha = if *marker { MARKER_ALPHA } else { 255 };
+      if is_zero {
+        draw::polyline(pm, points, *color, *width, alpha);
+      } else {
+        let mapped: Vec<Point> = points.iter().map(rel).collect();
+        draw::polyline(pm, &mapped, *color, *width, alpha);
+      }
     }
-    Shape::Marker {
-      points,
-      color,
-      width,
-    } => {
-      let mapped: Vec<Point> = points.iter().map(rel).collect();
-      draw::polyline(pm, &mapped, *color, *width, MARKER_ALPHA);
-    }
-    Shape::Segment {
+    Shape::Line {
       from,
       to,
       color,
       width,
+      arrow,
     } => {
-      draw::polyline(pm, &[rel(from), rel(to)], *color, *width, 255);
-    }
-    Shape::Arrow {
-      tail,
-      head,
-      color,
-      width,
-    } => {
-      let (start, end) = (rel(tail), rel(head));
-      let size = (*width * 3.5).max(6.0);
-      let (dx, dy) = (end.x - start.x, end.y - start.y);
-      let len = dx.hypot(dy);
-      let base = if len > 0.0 {
-        let k = size.min(len) / len;
-        Point::new(end.x - dx * k, end.y - dy * k)
+      let (start, end) = (rel(from), rel(to));
+      if *arrow {
+        let size = (*width * 3.5).max(6.0);
+        let (dx, dy) = (end.x - start.x, end.y - start.y);
+        let len = dx.hypot(dy);
+        let base = if len > 0.0 {
+          let k = size.min(len) / len;
+          Point::new(end.x - dx * k, end.y - dy * k)
+        } else {
+          end
+        };
+        draw::polyline(pm, &[start, base], *color, *width, 255);
+        draw::arrow_head(pm, start, end, size, *color, 255);
       } else {
-        end
-      };
-      draw::polyline(pm, &[start, base], *color, *width, 255);
-      draw::arrow_head(pm, start, end, size, *color, 255);
+        draw::polyline(pm, &[start, end], *color, *width, 255);
+      }
     }
     Shape::Outline { rect, color, width } => {
       let shifted = rect.translated(-origin.x, -origin.y);
@@ -486,29 +480,21 @@ fn draw_panels(pm: &mut Pixmap, scene: &Scene) {
     let hovered = scene.hotspot == Some(Hotspot::Action(index));
     draw_button(pm, button, hovered, swatch);
   }
-  if let Some(Hotspot::Tool(i)) = scene.hotspot {
-    if let Some(button) = scene.chrome.tools.get(i) {
-      draw_tooltip(
-        pm,
-        button.area,
-        button.command.label(),
-        scene.bounds,
-        scene.text,
-        Side::Left,
-      );
-    }
-  }
-  if let Some(Hotspot::Action(i)) = scene.hotspot {
-    if let Some(button) = scene.chrome.actions.get(i) {
-      draw_tooltip(
-        pm,
-        button.area,
-        button.command.label(),
-        scene.bounds,
-        scene.text,
-        Side::Above,
-      );
-    }
+
+  let (hovered_btn, side) = match scene.hotspot {
+    Some(Hotspot::Tool(i)) => (scene.chrome.tools.get(i), Side::Left),
+    Some(Hotspot::Action(i)) => (scene.chrome.actions.get(i), Side::Above),
+    None => (None, Side::Left),
+  };
+  if let Some(button) = hovered_btn {
+    draw_tooltip(
+      pm,
+      button.area,
+      button.command.label(),
+      scene.bounds,
+      scene.text,
+      side,
+    );
   }
   if let Some(text) = scene.hint {
     if let Some(button) = scene.chrome.tools.iter().find(|b| b.active) {
@@ -630,10 +616,7 @@ mod tests {
 
   #[test]
   fn hotspot_at_finds_button_under_point() {
-    let mut chrome = Chrome {
-      tools: vec![],
-      actions: vec![],
-    };
+    let mut chrome = Chrome::default();
     let mut b = button(Command::Undo, draw::Icon::Undo, true, false);
     b.area = Rect::new(10.0, 10.0, 30.0, 30.0);
     chrome.actions.push(b);
@@ -668,7 +651,9 @@ mod tests {
 
   #[test]
   fn build_hides_buttons_without_selection() {
-    let chrome = build(
+    let mut chrome = Chrome::default();
+    build(
+      &mut chrome,
       None,
       Rect::new(0.0, 0.0, 1920.0, 1080.0),
       Tool::Pen,
@@ -682,7 +667,9 @@ mod tests {
   #[test]
   fn build_shows_deliver_buttons_when_selection_is_ready() {
     let sel = Rect::new(10.0, 10.0, 200.0, 150.0);
-    let chrome = build(
+    let mut chrome = Chrome::default();
+    build(
+      &mut chrome,
       Some(sel),
       Rect::new(0.0, 0.0, 1920.0, 1080.0),
       Tool::Pen,
@@ -698,7 +685,9 @@ mod tests {
   #[test]
   fn build_hides_buttons_when_not_idle() {
     let sel = Rect::new(10.0, 10.0, 200.0, 150.0);
-    let chrome = build(
+    let mut chrome = Chrome::default();
+    build(
+      &mut chrome,
       Some(sel),
       Rect::new(0.0, 0.0, 1920.0, 1080.0),
       Tool::Pen,
@@ -746,11 +735,12 @@ mod tests {
     let mut frame = Pixmap::new(100, 100).unwrap();
     frame.data_mut().iter_mut().for_each(|p| *p = 100);
     let sel = Rect::new(10.0, 10.0, 20.0, 30.0);
-    let stroke = Shape::Segment {
+    let stroke = Shape::Line {
       from: Point::new(15.0, 15.0),
       to: Point::new(25.0, 35.0),
       color: [239, 68, 68],
       width: 2.5,
+      arrow: false,
     };
     let shot = flatten(&frame, sel, &[stroke], &engine);
     let painted = shot
@@ -769,11 +759,12 @@ mod tests {
     };
     let frame = Pixmap::new(100, 100).unwrap();
     let sel = Rect::new(0.0, 0.0, 100.0, 100.0);
-    let arrow = Shape::Arrow {
-      tail: Point::new(10.0, 50.0),
-      head: Point::new(90.0, 50.0),
+    let arrow = Shape::Line {
+      from: Point::new(10.0, 50.0),
+      to: Point::new(90.0, 50.0),
       color: [255, 0, 0],
       width: 4.0,
+      arrow: true,
     };
     let shot = flatten(&frame, sel, &[arrow], &engine);
     let width = shot.width as usize;
@@ -815,14 +806,22 @@ mod tests {
     let sel = Rect::new(5.0, 5.0, 30.0, 70.0);
     let selection = Some(sel);
     let history = History::default();
-    let chrome = build(selection, bounds, Tool::Select, &history, false);
+    let mut chrome = Chrome::default();
+    build(
+      &mut chrome,
+      selection,
+      bounds,
+      Tool::Select,
+      &history,
+      false,
+    );
 
-    // Draft endpoint is given in full-frame coordinates.
-    let draft = Shape::Segment {
+    let draft = Shape::Line {
       from: Point::new(10.0, 50.0),
       to: Point::new(30.0, 70.0),
       color: [255, 0, 0],
       width: 3.0,
+      arrow: false,
     };
 
     let mut pm = backdrop.clone();
@@ -844,9 +843,6 @@ mod tests {
 
     paint(&mut pm, &scene);
 
-    // The stroke must land at the absolute endpoint (30, 70), not shifted by
-    // the selection origin. A selection-local offset would place it near
-    // (25, 65) instead.
     let idx = (70 * 40 + 30) * 4;
     let px = &pm.data()[idx..idx + 4];
     assert!(

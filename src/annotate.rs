@@ -24,8 +24,9 @@ pub const MAX_SIZE: f32 = 100.0;
 pub const SIZE_STEP: f32 = 1.0;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+#[repr(usize)]
 pub enum Tool {
-  Select,
+  Select = 0,
   Pen,
   Line,
   Arrow,
@@ -76,30 +77,21 @@ impl Tool {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Shape {
-  Freehand {
+  Stroke {
     points: Vec<Point>,
     color: [u8; 3],
     width: f32,
+    marker: bool,
   },
-  Segment {
+  Line {
     from: Point,
     to: Point,
     color: [u8; 3],
     width: f32,
-  },
-  Arrow {
-    tail: Point,
-    head: Point,
-    color: [u8; 3],
-    width: f32,
+    arrow: bool,
   },
   Outline {
     rect: Rect,
-    color: [u8; 3],
-    width: f32,
-  },
-  Marker {
-    points: Vec<Point>,
     color: [u8; 3],
     width: f32,
   },
@@ -112,17 +104,19 @@ pub enum Shape {
 }
 
 impl Shape {
+  pub fn set_width(&mut self, new_width: f32) {
+    match self {
+      Shape::Stroke { width, .. }
+      | Shape::Line { width, .. }
+      | Shape::Outline { width, .. } => *width = new_width,
+      Shape::Caption { size, .. } => *size = new_width,
+    }
+  }
+
   pub fn is_complete(&self) -> bool {
     match self {
-      Shape::Freehand { points, .. } | Shape::Marker { points, .. } => {
-        points.len() >= 2
-      }
-      Shape::Segment { from, to, .. }
-      | Shape::Arrow {
-        tail: from,
-        head: to,
-        ..
-      } => from.distance(*to) >= 3.0,
+      Shape::Stroke { points, .. } => points.len() >= 2,
+      Shape::Line { from, to, .. } => from.distance(*to) >= 3.0,
       Shape::Outline { rect, .. } => rect.w >= 3.0 && rect.h >= 3.0,
       Shape::Caption { text, .. } => !text.trim().is_empty(),
     }
@@ -180,16 +174,18 @@ mod tests {
 
   #[test]
   fn incomplete_shapes_are_rejected() {
-    let stray = Shape::Freehand {
+    let stray = Shape::Stroke {
       points: vec![Point::new(0.0, 0.0)],
       color: PALETTE[1],
       width: LINE_WIDTH,
+      marker: false,
     };
-    let stub = Shape::Segment {
+    let stub = Shape::Line {
       from: Point::new(0.0, 0.0),
       to: Point::new(1.5, 0.0),
       color: PALETTE[2],
       width: LINE_WIDTH,
+      arrow: false,
     };
     assert!(!stray.is_complete());
     assert!(!stub.is_complete());

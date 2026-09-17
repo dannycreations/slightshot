@@ -6,7 +6,6 @@ use serde_json::Value;
 const ENDPOINT: &str = "https://api.imgur.com/3/image";
 const CLIENT_ID_VAR: &str = "IMGUR_CLIENT_ID";
 const BOUNDARY: &str = "slightshot-multipart-7f3a";
-const FILE_NAME: &str = "capture.png";
 
 pub fn upload(png: &[u8]) -> Result<String> {
   let client_id = env::var(CLIENT_ID_VAR).with_context(|| {
@@ -42,13 +41,12 @@ fn multipart(png: &[u8]) -> Vec<u8> {
   let mut body = Vec::with_capacity(png.len() + 256);
   body.extend_from_slice(
     format!(
-      "\
---{BOUNDARY}\r\n\
+      "--{BOUNDARY}\r\n\
 Content-Disposition: form-data; name=\"type\"\r\n\
 \r\n\
 file\r\n\
 --{BOUNDARY}\r\n\
-Content-Disposition: form-data; name=\"image\"; filename=\"{FILE_NAME}\"\r\n\
+Content-Disposition: form-data; name=\"image\"; filename=\"capture.png\"\r\n\
 Content-Type: image/png\r\n\
 \r\n"
     )
@@ -65,7 +63,7 @@ fn parse_link(body: &str) -> Result<String> {
   if !json["success"].as_bool().unwrap_or(false) {
     bail!(
       "Imgur rejected the upload: {}",
-      describe(json["data"]["error"].clone())
+      describe(&json["data"]["error"])
     );
   }
   json["data"]["link"]
@@ -74,9 +72,10 @@ fn parse_link(body: &str) -> Result<String> {
     .context("Imgur replied without an image link")
 }
 
-fn describe(error: Value) -> String {
+fn describe(error: &Value) -> String {
   match error {
     Value::Null => "unknown error".to_owned(),
+    Value::String(s) => s.clone(),
     other => other.to_string(),
   }
 }

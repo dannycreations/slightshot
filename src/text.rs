@@ -117,14 +117,14 @@ impl TextEngine {
         let px = gx + col;
         let py = gy + row;
         if px >= 0 && px < pw && py >= 0 && py < ph {
-          let a = glyph.coverage[i] as f32 / 255.0;
+          let a = glyph.coverage[i] as u32;
+          let inv = 255 - a;
           let di = ((py * pw + px) * 4) as usize;
           for c in 0..3 {
-            let base = pm[di + c] as f32;
-            pm[di + c] =
-              (base * (1.0 - a) + rgb[c] as f32 * a).min(255.0) as u8;
+            let base = pm[di + c] as u32;
+            pm[di + c] = ((base * inv + rgb[c] as u32 * a) / 255) as u8;
           }
-          pm[di + 3] = (pm[di + 3] as f32 + 255.0 * a).min(255.0) as u8;
+          pm[di + 3] = (pm[di + 3] as u32 + a).min(255) as u8;
         }
         i += 1;
       }

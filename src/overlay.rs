@@ -1,5 +1,4 @@
 use std::{
-  collections::HashMap,
   ffi::c_void,
   num::NonZeroU32,
   sync::Arc,
@@ -55,9 +54,9 @@ pub enum Outcome {
 enum Mode {
   #[default]
   Idle,
-  Rubber(f32, f32),
+  Rubber(Point),
   Draw(Shape, Point),
-  Move(f32, f32),
+  Move(Point),
   Resize(Handle, Rect),
   Type(String, Point),
 }
@@ -93,11 +92,11 @@ struct Session {
   cursor: Point,
   hover: Option<Hotspot>,
   chrome: Chrome,
-  screen: Vec<u32>,
   modifiers: ModifiersState,
-  sizes: HashMap<Tool, f32>,
+  sizes: [f32; 7],
   hint: Option<String>,
   hint_until: Option<Instant>,
+  hint_scheduled: bool,
 }
 
 #[derive(Default)]
@@ -221,7 +220,6 @@ impl App {
   fn finish(&mut self, outcome: Outcome) {
     self.session = None;
     let Outcome::Deliver { deliverable, shot } = outcome else {
-      // Closing has nothing to deliver, so there is nothing to run.
       return;
     };
     thread::spawn(move || match actions::execute(deliverable, &shot) {
@@ -234,6 +232,7 @@ impl App {
 impl Session {
   fn create(event_loop: &ActiveEventLoop) -> Result<Self> {
     let shot = capture::grab().context("screen capture failed")?;
+    let engine = TextEngine::load()?;
     let origin = shot.origin;
     let canvas = shot.pixmap;
     let bounds = Rect::new(
@@ -257,14 +256,6 @@ impl Session {
         .create_window(attributes)
         .context("creating the overlay window failed")?,
     );
-    // SAFETY: `hwnd` comes from a winit window alive for the whole overlay
-    // lifetime. `SetClassLongPtrW` only clears the class background brush so
-    // Windows stops erasing the client area to white before our first frame
-    // composites (the white flash seen on capture). `DwmSetWindowAttribute`
-    // with `DWMWA_TRANSITIONS_FORCEDISABLED` disables the DWM open/close fade so
-    // the dimmed overlay appears the instant the window is shown instead of
-    // fading in over ~200ms. Both are documented Win32 calls that neither move
-    // nor free the window or its class.
     if let Ok(handle) = window.window_handle() {
       if let RawWindowHandle::Win32(w) = handle.as_raw() {
         let hwnd = HWND(w.hwnd.get() as *mut c_void);
@@ -283,10 +274,23 @@ impl Session {
     let context = SoftContext::new(window.clone()).map_err(|error| {
       anyhow!("no graphics context for the overlay: {error}")
     })?;
-    let surface = SoftSurface::new(&context, window.clone())
+    let mut surface = SoftSurface::new(&context, window.clone())
       .map_err(|error| anyhow!("no surface for the overlay: {error}"))?;
+    surface
+      .resize(
+        NonZeroU32::new(canvas.width()).context("zero-width capture")?,
+        NonZeroU32::new(canvas.height()).context("zero-height capture")?,
+      )
+      .map_err(|e| anyhow!("failed to resize the overlay surface: {e}"))?;
+
     let frame = Pixmap::new(canvas.width(), canvas.height())
       .expect("frame allocation failed");
+
+    let mut sizes = [0.0f32; 7];
+    for tool in Tool::all() {
+      sizes[*tool as usize] = tool.default_size();
+    }
+
     let mut session = Self {
       window,
       canvas,
@@ -299,32 +303,18 @@ impl Session {
       tool: Tool::Select,
       palette_index: 0,
       history: History::default(),
-      engine: TextEngine::default(),
+      engine,
       cursor: Point::default(),
       hover: None,
-      chrome: Chrome {
-        tools: Vec::new(),
-        actions: Vec::new(),
-      },
-      screen: Vec::new(),
+      chrome: Chrome::default(),
       modifiers: ModifiersState::default(),
-      sizes: Tool::all().iter().map(|&t| (t, t.default_size())).collect(),
+      sizes,
       hint: None,
       hint_until: None,
+      hint_scheduled: false,
     };
-    session
-      .surface
-      .resize(
-        NonZeroU32::new(session.canvas.width())
-          .context("zero-width capture")?,
-        NonZeroU32::new(session.canvas.height())
-          .context("zero-height capture")?,
-      )
-      .map_err(|e| anyhow!("failed to resize the overlay surface: {e}"))?;
     session.window.set_visible(true);
     session.render();
-    session.engine = TextEngine::load()?;
-    session.window.request_redraw();
     Ok(session)
   }
 
@@ -333,9 +323,11 @@ impl Session {
       if Instant::now() >= until {
         self.hint = None;
         self.hint_until = None;
+        self.hint_scheduled = false;
       }
     }
-    self.chrome = render::build(
+    render::build(
+      &mut self.chrome,
       self.selection,
       self.bounds,
       self.tool,
@@ -373,16 +365,10 @@ impl Session {
     let Ok(mut buffer) = self.surface.buffer_mut() else {
       return;
     };
-    let w = self.frame.width() as usize;
-    let h = self.frame.height() as usize;
-    if w == 0 || h == 0 {
+    if buffer.len() != (self.frame.width() * self.frame.height()) as usize {
       return;
     }
-    if self.screen.len() != w * h {
-      self.screen = vec![0u32; w * h];
-    }
-    pack_rgba(self.frame.data(), &mut self.screen);
-    buffer.copy_from_slice(&self.screen);
+    pack_rgba(self.frame.data(), &mut buffer);
     let _ = buffer.present();
   }
 
@@ -424,23 +410,20 @@ impl Session {
           self.window.set_cursor(CursorIcon::default());
         }
       }
-      Mode::Rubber(x, y) => {
-        self.selection = Some(Rect::spanning(Point::new(*x, *y), p));
+      Mode::Rubber(anchor) => {
+        self.selection = Some(Rect::spanning(*anchor, p));
         self.window.request_redraw();
       }
       Mode::Draw(draft, anchor) => {
         extend_draft(*anchor, draft, p);
         self.window.request_redraw();
       }
-      Mode::Move(last_x, last_y) => {
+      Mode::Move(last) => {
         let sel = self.selection.expect("move mode requires a selection");
-        let moved = sel
-          .moved_inside(self.bounds, Point::new(p.x - *last_x, p.y - *last_y));
-        // Shapes are stored in absolute screenshot coordinates, so dragging
-        // the selection rectangle must not shift them.
+        let moved =
+          sel.moved_inside(self.bounds, Point::new(p.x - last.x, p.y - last.y));
         self.selection = Some(moved);
-        *last_x = p.x;
-        *last_y = p.y;
+        *last = p;
         self.window.request_redraw();
       }
       Mode::Resize(handle, rect) => {
@@ -464,7 +447,7 @@ impl Session {
           return None;
         }
         if sel.contains(p) {
-          self.mode = Mode::Move(p.x, p.y);
+          self.mode = Mode::Move(p);
           return None;
         }
       }
@@ -472,7 +455,7 @@ impl Session {
     self.mode = match self.tool {
       Tool::Select => {
         self.selection = None;
-        Mode::Rubber(p.x, p.y)
+        Mode::Rubber(p)
       }
       Tool::Label => Mode::Type(String::new(), p),
       tool => Mode::Draw(self.new_shape(tool, p), p),
@@ -485,27 +468,31 @@ impl Session {
     let color = active_color(self.palette_index);
     let width = self.size(tool);
     match tool {
-      Tool::Pen => Shape::Freehand {
+      Tool::Pen => Shape::Stroke {
         points: vec![p],
         color,
         width,
+        marker: false,
       },
-      Tool::Marker => Shape::Marker {
+      Tool::Marker => Shape::Stroke {
         points: vec![p],
         color,
         width,
+        marker: true,
       },
-      Tool::Line => Shape::Segment {
+      Tool::Line => Shape::Line {
         from: p,
         to: p,
         color,
         width,
+        arrow: false,
       },
-      Tool::Arrow => Shape::Arrow {
-        tail: p,
-        head: p,
+      Tool::Arrow => Shape::Line {
+        from: p,
+        to: p,
         color,
         width,
+        arrow: true,
       },
       Tool::Box => Shape::Outline {
         rect: Rect::new(p.x, p.y, 0.0, 0.0),
@@ -556,18 +543,16 @@ impl Session {
 
   fn mouse_up(&mut self) {
     match std::mem::replace(&mut self.mode, Mode::Idle) {
-      Mode::Rubber(_, _) => {
+      Mode::Rubber(_) => {
         self.selection = render::deliverable_region(self.selection);
       }
       Mode::Draw(draft, _) if draft.is_complete() => {
         self.history.push(draft);
       }
-      Mode::Draw(_, _) => {}
-      Mode::Move(_, _) | Mode::Resize(_, _) => {}
       Mode::Type(buffer, anchor) => {
         self.mode = Mode::Type(buffer, anchor);
       }
-      Mode::Idle => {}
+      _ => {}
     }
     self.window.request_redraw();
   }
@@ -604,7 +589,7 @@ impl Session {
   }
 
   fn size(&self, tool: Tool) -> f32 {
-    self.sizes.get(&tool).copied().unwrap_or_default()
+    self.sizes[tool as usize]
   }
 
   fn is_typing(&self) -> bool {
@@ -617,17 +602,9 @@ impl Session {
       return;
     }
     let next = (self.size(tool) + delta).clamp(MIN_SIZE, MAX_SIZE);
-    self.sizes.insert(tool, next);
-    if let Mode::Draw(
-      Shape::Marker { width, .. }
-      | Shape::Freehand { width, .. }
-      | Shape::Segment { width, .. }
-      | Shape::Arrow { width, .. }
-      | Shape::Outline { width, .. },
-      _,
-    ) = &mut self.mode
-    {
-      *width = next;
+    self.sizes[tool as usize] = next;
+    if let Mode::Draw(shape, _) = &mut self.mode {
+      shape.set_width(next);
     }
     self.hint = Some(format_size(next));
     self.hint_until = Some(Instant::now() + HINT_DURATION);
@@ -635,7 +612,11 @@ impl Session {
     self.window.request_redraw();
   }
 
-  fn schedule_hint_clear(&self) {
+  fn schedule_hint_clear(&mut self) {
+    if self.hint_scheduled {
+      return;
+    }
+    self.hint_scheduled = true;
     let window = self.window.clone();
     let _ = thread::Builder::new()
       .name("slightshot-hint".to_string())
@@ -648,10 +629,11 @@ impl Session {
 
 fn pack_rgba(rgba: &[u8], out: &mut [u32]) {
   for (chunk, pixel) in rgba.as_chunks::<4>().0.iter().zip(out.iter_mut()) {
-    *pixel = (0xFFu32 << 24)
-      | ((chunk[0] as u32) << 16)
-      | ((chunk[1] as u32) << 8)
-      | (chunk[2] as u32);
+    let w = u32::from_le_bytes(*chunk);
+    *pixel = 0xff00_0000
+      | ((w & 0x0000_00ff) << 16)
+      | (w & 0x0000_ff00)
+      | ((w & 0x00ff_0000) >> 16);
   }
 }
 
@@ -665,10 +647,8 @@ fn format_size(size: f32) -> String {
 
 pub fn extend_draft(anchor: Point, draft: &mut Shape, p: Point) {
   match draft {
-    Shape::Freehand { points, .. } | Shape::Marker { points, .. } => {
-      points.push(p)
-    }
-    Shape::Segment { to, .. } | Shape::Arrow { head: to, .. } => *to = p,
+    Shape::Stroke { points, .. } => points.push(p),
+    Shape::Line { to, .. } => *to = p,
     Shape::Outline { rect, .. } => *rect = Rect::spanning(anchor, p),
     Shape::Caption { at, .. } => *at = p,
   }
@@ -691,18 +671,20 @@ mod tests {
 
   #[test]
   fn extend_draft_appends_to_paths_and_resizes_boxes() {
-    let mut free = Shape::Freehand {
+    let mut free = Shape::Stroke {
       points: vec![Point::new(1.0, 1.0)],
       color: [0, 0, 0],
       width: 2.0,
+      marker: false,
     };
     extend_draft(Point::new(0.0, 0.0), &mut free, Point::new(5.0, 5.0));
     assert_eq!(
       free,
-      Shape::Freehand {
+      Shape::Stroke {
         points: vec![Point::new(1.0, 1.0), Point::new(5.0, 5.0)],
         color: [0, 0, 0],
         width: 2.0,
+        marker: false,
       }
     );
 

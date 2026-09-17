@@ -7,7 +7,7 @@ use windows::Win32::{
   Graphics::Gdi::{
     BitBlt, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject,
     GetDC, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
-    CAPTUREBLT, DIB_RGB_COLORS, SRCCOPY,
+    CAPTUREBLT, DIB_RGB_COLORS, HDC, HGDIOBJ, SRCCOPY,
   },
   UI::WindowsAndMessaging::{
     GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
@@ -27,14 +27,45 @@ fn bgra_to_rgba(src: &[u8], dst: &mut [u8]) {
     .iter_mut()
     .zip(src.as_chunks::<4>().0)
   {
-    *out = [bgra[2], bgra[1], bgra[0], 255];
+    let w = u32::from_le_bytes(*bgra);
+    let rgba = (w & 0x0000_ff00)
+      | ((w & 0x00ff_0000) >> 16)
+      | ((w & 0x0000_00ff) << 16)
+      | 0xff00_0000;
+    *out = rgba.to_le_bytes();
+  }
+}
+
+struct DcGuard {
+  screen_dc: HDC,
+  mem_dc: HDC,
+}
+
+impl Drop for DcGuard {
+  fn drop(&mut self) {
+    unsafe {
+      let _ = DeleteDC(self.mem_dc);
+      ReleaseDC(None, self.screen_dc);
+    }
+  }
+}
+
+struct BmpGuard {
+  mem_dc: HDC,
+  bmp: HGDIOBJ,
+  previous: HGDIOBJ,
+}
+
+impl Drop for BmpGuard {
+  fn drop(&mut self) {
+    unsafe {
+      SelectObject(self.mem_dc, self.previous);
+      let _ = DeleteObject(self.bmp);
+    }
   }
 }
 
 pub fn grab() -> Result<ScreenShot> {
-  // SAFETY: the DIB section owns the only raw pointer involved; its bits
-  // are read while `bmp` is alive and every GDI handle is released on all
-  // paths before returning. The calls themselves are thread-safe here.
   unsafe {
     let x = GetSystemMetrics(SM_XVIRTUALSCREEN);
     let y = GetSystemMetrics(SM_YVIRTUALSCREEN);
@@ -51,6 +82,8 @@ pub fn grab() -> Result<ScreenShot> {
       ReleaseDC(None, screen_dc);
       bail!("CreateCompatibleDC failed");
     }
+    let dc_guard = DcGuard { screen_dc, mem_dc };
+
     let info = BITMAPINFO {
       bmiHeader: BITMAPINFOHEADER {
         biSize: mem::size_of::<BITMAPINFOHEADER>() as u32,
@@ -69,7 +102,13 @@ pub fn grab() -> Result<ScreenShot> {
       CreateDIBSection(Some(mem_dc), &info, DIB_RGB_COLORS, &mut bits, None, 0)
         .context("CreateDIBSection failed")?;
     let previous = SelectObject(mem_dc, bmp.into());
-    let blitted = BitBlt(
+    let bmp_guard = BmpGuard {
+      mem_dc,
+      bmp: bmp.into(),
+      previous,
+    };
+
+    BitBlt(
       mem_dc,
       0,
       0,
@@ -79,21 +118,16 @@ pub fn grab() -> Result<ScreenShot> {
       x,
       y,
       SRCCOPY | CAPTUREBLT,
-    );
+    )
+    .context("BitBlt of the desktop failed")?;
 
-    let converted = blitted.context("BitBlt of the desktop failed").map(|_| {
-      let raw = slice::from_raw_parts(bits as *const u8, pixels);
-      let mut rgba = vec![0_u8; pixels];
-      bgra_to_rgba(raw, &mut rgba);
-      rgba
-    });
+    let raw = slice::from_raw_parts(bits as *const u8, pixels);
+    let mut rgba = vec![0_u8; pixels];
+    bgra_to_rgba(raw, &mut rgba);
 
-    SelectObject(mem_dc, previous);
-    let _ = DeleteObject(bmp.into());
-    let _ = DeleteDC(mem_dc);
-    ReleaseDC(None, screen_dc);
+    drop(bmp_guard);
+    drop(dc_guard);
 
-    let rgba = converted?;
     let size = IntSize::from_wh(width as u32, height as u32)
       .context("zero-sized capture")?;
     let pixmap = Pixmap::from_vec(rgba, size)

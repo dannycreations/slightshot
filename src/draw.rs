@@ -1,7 +1,4 @@
-use std::{
-  collections::HashMap,
-  sync::{Arc, Mutex, OnceLock},
-};
+use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::OnceLock};
 
 use tiny_skia::{
   Color, FillRule, LineCap, LineJoin, Paint, Path, PathBuilder, Pixmap,
@@ -9,6 +6,10 @@ use tiny_skia::{
 };
 
 use crate::geom::{Point, Rect as GeoRect};
+
+fn skia_rect(rect: GeoRect) -> Option<Rect> {
+  Rect::from_xywh(rect.x, rect.y, rect.w, rect.h)
+}
 
 fn paint(r: u8, g: u8, b: u8, a: u8) -> Paint<'static> {
   Paint {
@@ -56,6 +57,10 @@ fn smooth_path(points: &[Point]) -> Option<Path> {
   }
   let mut builder = PathBuilder::new();
   builder.move_to(points[0].x, points[0].y);
+  if points.len() == 2 {
+    builder.line_to(points[1].x, points[1].y);
+    return builder.finish();
+  }
   for i in 0..points.len() - 1 {
     let prev = points[i.saturating_sub(1)];
     let curr = points[i];
@@ -163,7 +168,7 @@ pub fn rect_stroke(
   width: f32,
   alpha: u8,
 ) {
-  let Some(r) = Rect::from_xywh(rect.x, rect.y, rect.w, rect.h) else {
+  let Some(r) = skia_rect(rect) else {
     return;
   };
   let mut path = PathBuilder::new();
@@ -181,7 +186,7 @@ pub fn rect_stroke(
 }
 
 pub fn rect_fill(pm: &mut Pixmap, rect: GeoRect, rgb: [u8; 3], alpha: u8) {
-  let Some(r) = Rect::from_xywh(rect.x, rect.y, rect.w, rect.h) else {
+  let Some(r) = skia_rect(rect) else {
     return;
   };
   pm.fill_rect(
@@ -214,13 +219,13 @@ fn round_rect_path(r: Rect, radius: f32) -> Option<Path> {
   let mut path = PathBuilder::new();
   path.move_to(r.x() + rr, r.y());
   path.line_to(r.right() - rr, r.y());
-  path.quad_to(r.right() - rr, r.y(), r.right(), r.y() + rr);
+  path.quad_to(r.right(), r.y(), r.right(), r.y() + rr);
   path.line_to(r.right(), r.bottom() - rr);
-  path.quad_to(r.right(), r.bottom() - rr, r.right() - rr, r.bottom());
+  path.quad_to(r.right(), r.bottom(), r.right() - rr, r.bottom());
   path.line_to(r.x() + rr, r.bottom());
-  path.quad_to(r.x() + rr, r.bottom(), r.x(), r.bottom() - rr);
+  path.quad_to(r.x(), r.bottom(), r.x(), r.bottom() - rr);
   path.line_to(r.x(), r.y() + rr);
-  path.quad_to(r.x(), r.y() + rr, r.x() + rr, r.y());
+  path.quad_to(r.x(), r.y(), r.x() + rr, r.y());
   path.close();
   path.finish()
 }
@@ -232,7 +237,7 @@ pub fn rounded_fill(
   rgb: [u8; 3],
   alpha: u8,
 ) {
-  let Some(r) = Rect::from_xywh(rect.x, rect.y, rect.w, rect.h) else {
+  let Some(r) = skia_rect(rect) else {
     return;
   };
   let Some(path) = round_rect_path(r, radius) else {
@@ -255,7 +260,7 @@ pub fn rounded_stroke(
   width: f32,
   alpha: u8,
 ) {
-  let Some(r) = Rect::from_xywh(rect.x, rect.y, rect.w, rect.h) else {
+  let Some(r) = skia_rect(rect) else {
     return;
   };
   let Some(path) = round_rect_path(r, radius) else {
@@ -307,37 +312,42 @@ impl Icon {
   }
 }
 
-type TintCache = HashMap<(usize, [u8; 3], u32), Arc<Pixmap>>;
+type TintCache = HashMap<(usize, [u8; 3], u32), Rc<Pixmap>>;
 
-fn tinted_sprite(icon: Icon, color: [u8; 3], box_size: f32) -> Arc<Pixmap> {
-  static CACHE: OnceLock<Mutex<TintCache>> = OnceLock::new();
-  let mut cache = CACHE.get_or_init(Default::default).lock().unwrap();
-  cache
-    .entry((icon as usize, color, box_size.to_bits()))
-    .or_insert_with(|| {
-      let source = sprite(icon);
-      let scale = box_size / source.width() as f32;
-      let w = (source.width() as f32 * scale).round() as u32;
-      let h = (source.height() as f32 * scale).round() as u32;
-      let mut tinted =
-        Pixmap::new(w, h).expect("allocating the icon pixmap failed");
-      tinted.draw_pixmap(
-        0,
-        0,
-        source.as_ref(),
-        &PixmapPaint::default(),
-        Transform::from_scale(scale, scale),
-        None,
-      );
-      for pixel in tinted.data_mut().chunks_mut(4) {
-        let a = pixel[3] as u32;
-        pixel[0] = ((color[0] as u32 * a) / 255) as u8;
-        pixel[1] = ((color[1] as u32 * a) / 255) as u8;
-        pixel[2] = ((color[2] as u32 * a) / 255) as u8;
-      }
-      Arc::new(tinted)
-    })
-    .clone()
+thread_local! {
+  static TINT_CACHE: RefCell<TintCache> = RefCell::new(HashMap::new());
+}
+
+fn tinted_sprite(icon: Icon, color: [u8; 3], box_size: f32) -> Rc<Pixmap> {
+  TINT_CACHE.with(|cache| {
+    cache
+      .borrow_mut()
+      .entry((icon as usize, color, box_size.to_bits()))
+      .or_insert_with(|| {
+        let source = sprite(icon);
+        let scale = box_size / source.width() as f32;
+        let w = (source.width() as f32 * scale).round() as u32;
+        let h = (source.height() as f32 * scale).round() as u32;
+        let mut tinted =
+          Pixmap::new(w, h).expect("allocating the icon pixmap failed");
+        tinted.draw_pixmap(
+          0,
+          0,
+          source.as_ref(),
+          &PixmapPaint::default(),
+          Transform::from_scale(scale, scale),
+          None,
+        );
+        for pixel in tinted.data_mut().chunks_mut(4) {
+          let a = pixel[3] as u32;
+          pixel[0] = ((color[0] as u32 * a) / 255) as u8;
+          pixel[1] = ((color[1] as u32 * a) / 255) as u8;
+          pixel[2] = ((color[2] as u32 * a) / 255) as u8;
+        }
+        Rc::new(tinted)
+      })
+      .clone()
+  })
 }
 
 const ICONS: [Icon; 11] = [

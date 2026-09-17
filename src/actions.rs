@@ -3,7 +3,6 @@ use std::{
   env, fs,
   io::Cursor,
   path::{Path, PathBuf},
-  thread,
   time::SystemTime,
 };
 
@@ -50,10 +49,9 @@ pub fn execute(deliverable: Deliverable, shot: &Shot) -> Result<String> {
   match deliverable {
     Deliverable::Upload => {
       let png = png_bytes(shot)?;
-      let kib = png.len() / 1024;
-      // Off-thread so the watcher stays live while the upload runs.
-      thread::spawn(move || deliver_upload(&png));
-      Ok(format!("uploading {kib} KiB"))
+      let link = upload::upload(&png)?;
+      copy_text(&link)?;
+      Ok(format!("uploaded {link}; link copied"))
     }
     Deliverable::Copy => {
       copy_to_clipboard(shot)?;
@@ -69,19 +67,6 @@ pub fn execute(deliverable: Deliverable, shot: &Shot) -> Result<String> {
       let path = dir.join(stamp());
       encode_png(shot, &path)?;
       Ok(format!("saved {}", path.display()))
-    }
-  }
-}
-
-fn deliver_upload(png: &[u8]) {
-  let link = match upload::upload(png) {
-    Ok(link) => link,
-    Err(error) => return eprintln!("slightshot: upload failed: {error:#}"),
-  };
-  match copy_text(&link) {
-    Ok(()) => println!("slightshot: uploaded {link}; link copied"),
-    Err(error) => {
-      eprintln!("slightshot: uploaded {link}; copying it failed: {error:#}")
     }
   }
 }
