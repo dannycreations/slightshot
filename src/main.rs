@@ -1,5 +1,6 @@
 mod action;
 mod annotate;
+mod cache;
 mod capture;
 mod draw;
 mod geom;

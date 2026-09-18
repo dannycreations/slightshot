@@ -26,6 +26,11 @@ impl Point {
   }
 }
 
+#[inline(always)]
+pub fn clamp_span(value: f32, len: f32, min: f32, max: f32) -> f32 {
+  value.clamp(min, (max - len).max(min))
+}
+
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub struct Rect {
   pub x: f32,
@@ -75,8 +80,8 @@ impl Rect {
   pub fn clamped_inside(self, bounds: Rect) -> Rect {
     let w = self.w.min(bounds.w);
     let h = self.h.min(bounds.h);
-    let x = self.x.clamp(bounds.x, bounds.right() - w);
-    let y = self.y.clamp(bounds.y, bounds.bottom() - h);
+    let x = clamp_span(self.x, w, bounds.x, bounds.right());
+    let y = clamp_span(self.y, h, bounds.y, bounds.bottom());
     Self::new(x, y, w, h)
   }
 
@@ -247,5 +252,11 @@ mod tests {
     assert_eq!(grown, Rect::new(5.0, 5.0, 110.0, 110.0));
     let shrunk = rect.inflated(-5.0);
     assert_eq!(shrunk, Rect::new(15.0, 15.0, 90.0, 90.0));
+  }
+
+  #[test]
+  fn clamp_span_keeps_the_span_on_screen() {
+    assert_eq!(clamp_span(2300.0, 300.0, 0.0, 1920.0), 1620.0);
+    assert_eq!(clamp_span(-50.0, 300.0, 0.0, 1920.0), 0.0);
   }
 }

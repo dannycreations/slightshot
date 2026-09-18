@@ -360,7 +360,13 @@ impl Session {
 
   fn ensure_ink_buffers(&mut self) {
     if self.inked_backdrop.is_none() {
-      self.inked_backdrop = Some(self.backdrop.clone());
+      // Content doesn't matter here: both callers overwrite every pixel via
+      // `dimmed_into` right after inking the canvas, so there is no reason
+      // to clone the plain backdrop just to discard it.
+      self.inked_backdrop = Some(
+        Pixmap::new(self.backdrop.width(), self.backdrop.height())
+          .expect("backdrop allocation failed"),
+      );
     }
     if self.inked_canvas.is_none() {
       self.inked_canvas = Some(self.canvas.clone());
@@ -430,9 +436,9 @@ impl Session {
     }
     self.cursor = p;
     let previous = self.hover;
-    self.hover = self
-      .selection
-      .and_then(|_| render::hotspot_at(&self.chrome, p));
+    self.hover = (self.mode.shows_chrome() && self.selection.is_some())
+      .then(|| render::hotspot_at(&self.chrome, p))
+      .flatten();
     if self.hover != previous {
       self.window.request_redraw();
     }
@@ -441,16 +447,9 @@ impl Session {
         if self.tool == Tool::Select {
           if let Some(sel) = self.selection {
             match hit_handle(sel, p, HANDLE_SLOP) {
-              Some(_) => {
-                let cursor = resize_cursor(sel, p);
-                self.update_cursor(cursor);
-              }
-              None if sel.contains(p) => {
-                self.update_cursor(CursorIcon::Move);
-              }
-              None => {
-                self.update_cursor(CursorIcon::default());
-              }
+              Some(handle) => self.update_cursor(resize_cursor(handle)),
+              None if sel.contains(p) => self.update_cursor(CursorIcon::Move),
+              None => self.update_cursor(CursorIcon::default()),
             }
           }
         } else {
@@ -606,25 +605,15 @@ impl Session {
     Some(Outcome::Deliver { deliverable, shot })
   }
 
-  #[inline]
-  fn ink_into(
-    bd: &mut Pixmap,
-    cv: &mut Pixmap,
-    shape: &Shape,
-    engine: &TextEngine,
-  ) {
-    render::ink(bd, shape, Point::default(), engine);
-    render::ink(cv, shape, Point::default(), engine);
-  }
-
   fn ink_shape(&mut self, shape: &Shape) {
     self.ensure_ink_buffers();
-    Self::ink_into(
-      self.inked_backdrop.as_mut().unwrap(),
-      self.inked_canvas.as_mut().unwrap(),
-      shape,
-      &self.engine,
-    );
+    let canvas = self.inked_canvas.as_mut().unwrap();
+    render::ink(canvas, shape, Point::default(), &self.engine);
+    // The backdrop is just a dimmed view of the canvas, so refresh it with a
+    // cheap lookup-table pass instead of re-running the (much pricier)
+    // anti-aliased stroke rasterizer a second time for the same shape.
+    let backdrop = self.inked_backdrop.as_mut().unwrap();
+    render::dimmed_into(backdrop, canvas);
   }
 
   fn rebuild_ink(&mut self) {
@@ -634,13 +623,15 @@ impl Session {
       return;
     }
     self.ensure_ink_buffers();
-    let bd = self.inked_backdrop.as_mut().unwrap();
-    let cv = self.inked_canvas.as_mut().unwrap();
-    bd.data_mut().copy_from_slice(self.backdrop.data());
-    cv.data_mut().copy_from_slice(self.canvas.data());
+    let canvas = self.inked_canvas.as_mut().unwrap();
+    canvas.data_mut().copy_from_slice(self.canvas.data());
     for shape in self.history.shapes() {
-      Self::ink_into(bd, cv, shape, &self.engine);
+      render::ink(canvas, shape, Point::default(), &self.engine);
     }
+    // One dimmed pass over the fully replayed canvas beats re-stroking every
+    // surviving shape a second time just for the backdrop.
+    let backdrop = self.inked_backdrop.as_mut().unwrap();
+    render::dimmed_into(backdrop, canvas);
   }
 
   fn mouse_up(&mut self) {
@@ -767,13 +758,12 @@ pub fn extend_draft(anchor: Point, draft: &mut Shape, p: Point) -> bool {
   }
 }
 
-pub fn resize_cursor(selection: Rect, p: Point) -> CursorIcon {
-  match hit_handle(selection, p, HANDLE_SLOP) {
-    Some(Handle::TopLeft) | Some(Handle::BottomRight) => CursorIcon::NwseResize,
-    Some(Handle::BottomLeft) | Some(Handle::TopRight) => CursorIcon::NeswResize,
-    Some(Handle::Top) | Some(Handle::Bottom) => CursorIcon::NsResize,
-    Some(Handle::Left) | Some(Handle::Right) => CursorIcon::EwResize,
-    None => CursorIcon::default(),
+pub fn resize_cursor(handle: Handle) -> CursorIcon {
+  match handle {
+    Handle::TopLeft | Handle::BottomRight => CursorIcon::NwseResize,
+    Handle::BottomLeft | Handle::TopRight => CursorIcon::NeswResize,
+    Handle::Top | Handle::Bottom => CursorIcon::NsResize,
+    Handle::Left | Handle::Right => CursorIcon::EwResize,
   }
 }
 
@@ -818,16 +808,21 @@ mod tests {
   }
 
   #[test]
-  fn resize_cursor_picks_the_right_handle_cursor() {
-    let sel = GeoRect::new(10.0, 10.0, 100.0, 100.0);
-    let corner = handle_anchor(sel, Handle::TopLeft);
-    assert_eq!(resize_cursor(sel, corner), CursorIcon::NwseResize);
-    let edge = handle_anchor(sel, Handle::Top);
-    assert_eq!(resize_cursor(sel, edge), CursorIcon::NsResize);
-    assert_eq!(
-      resize_cursor(sel, Point::new(500.0, 500.0)),
-      CursorIcon::default()
-    );
+  fn resize_cursor_maps_each_handle_to_its_icon() {
+    use Handle::*;
+    let cases = [
+      (TopLeft, CursorIcon::NwseResize),
+      (BottomRight, CursorIcon::NwseResize),
+      (BottomLeft, CursorIcon::NeswResize),
+      (TopRight, CursorIcon::NeswResize),
+      (Top, CursorIcon::NsResize),
+      (Bottom, CursorIcon::NsResize),
+      (Left, CursorIcon::EwResize),
+      (Right, CursorIcon::EwResize),
+    ];
+    for (handle, expected) in cases {
+      assert_eq!(resize_cursor(handle), expected);
+    }
   }
 
   #[test]

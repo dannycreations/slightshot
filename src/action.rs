@@ -1,7 +1,7 @@
 use std::{
   borrow::Cow,
   env, fs,
-  io::{BufWriter, Cursor, Write},
+  io::{BufWriter, Write},
   path::{Path, PathBuf},
   time::SystemTime,
 };
@@ -98,9 +98,9 @@ fn write_png<W: Write>(shot: &Shot, writer: W) -> Result<()> {
 
 fn png_bytes(shot: &Shot) -> Result<Vec<u8>> {
   let capacity = (shot.rgba.len() / 4).max(4096);
-  let mut cursor = Cursor::new(Vec::with_capacity(capacity));
-  write_png(shot, &mut cursor)?;
-  Ok(cursor.into_inner())
+  let mut buffer = Vec::with_capacity(capacity);
+  write_png(shot, &mut buffer)?;
+  Ok(buffer)
 }
 
 fn encode_png(shot: &Shot, path: &Path) -> Result<()> {
@@ -131,6 +131,8 @@ fn copy_text(text: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+  use std::io::Cursor;
+
   use super::*;
 
   #[test]

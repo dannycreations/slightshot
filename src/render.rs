@@ -4,7 +4,7 @@ use crate::{
   action::{Deliverable, Shot},
   annotate::{active_color, History, Shape, Tool, MARKER_ALPHA},
   draw,
-  geom::{handle_anchor, Point, Rect, HANDLES},
+  geom::{clamp_span, handle_anchor, Point, Rect, HANDLES},
   text::TextEngine,
 };
 
@@ -52,10 +52,13 @@ pub struct Button {
   pub active: bool,
 }
 
+type LayoutSignature = (Option<Rect>, Rect, bool);
+
 #[derive(Debug, Default)]
 pub struct Chrome {
   pub tools: Vec<Button>,
   pub actions: Vec<Button>,
+  layout: Option<LayoutSignature>,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -145,15 +148,20 @@ pub fn build(
     b.enabled = ready;
   }
 
-  if show_chrome && selection.is_some() {
-    layout_panel(&mut chrome.tools, selection, bounds, Axis::Vertical);
-    layout_panel(&mut chrome.actions, selection, bounds, Axis::Horizontal);
-  } else {
-    for b in &mut chrome.tools {
-      b.area = Rect::default();
-    }
-    for b in &mut chrome.actions {
-      b.area = Rect::default();
+  let visible = show_chrome && selection.is_some();
+  let signature: LayoutSignature = (selection, bounds, visible);
+  if chrome.layout != Some(signature) {
+    chrome.layout = Some(signature);
+    if visible {
+      layout_panel(&mut chrome.tools, selection, bounds, Axis::Vertical);
+      layout_panel(&mut chrome.actions, selection, bounds, Axis::Horizontal);
+    } else {
+      for b in &mut chrome.tools {
+        b.area = Rect::default();
+      }
+      for b in &mut chrome.actions {
+        b.area = Rect::default();
+      }
     }
   }
 }
@@ -202,7 +210,7 @@ fn layout_panel(
       if x + width > bounds.right() {
         x = sel.right() - width - 6.0;
       }
-      x = x.clamp(bounds.x, (bounds.right() - width).max(bounds.x));
+      x = clamp_span(x, width, bounds.x, bounds.right());
       let y = (sel.bottom() - height).clamp(
         bounds.y + 4.0,
         (bounds.bottom() - height - 4.0).max(bounds.y),
@@ -215,7 +223,7 @@ fn layout_panel(
       if y + height > bounds.bottom() {
         y = sel.y - height - 8.0;
       }
-      let y = y.clamp(bounds.y, (bounds.bottom() - height).max(bounds.y));
+      let y = clamp_span(y, height, bounds.y, bounds.bottom());
       (x, y)
     }
   };
@@ -305,22 +313,21 @@ const DIM_LUT: [u8; 256] = {
   lut
 };
 
-pub fn dimmed_copy(frame: &Pixmap) -> Pixmap {
-  let width = frame.width();
-  let height = frame.height();
-  let mut out = Pixmap::new(width, height).expect("valid frame dimensions");
-  let src = frame.data();
-  let dst = out.data_mut();
-  let src_chunks = src.as_chunks::<4>().0;
-  let dst_chunks = dst.as_chunks_mut::<4>().0;
-
+pub fn dimmed_into(dst: &mut Pixmap, src: &Pixmap) {
+  let dst_chunks = dst.data_mut().as_chunks_mut::<4>().0;
+  let src_chunks = src.data().as_chunks::<4>().0;
   for (dst_px, src_px) in dst_chunks.iter_mut().zip(src_chunks) {
     dst_px[0] = DIM_LUT[src_px[0] as usize];
     dst_px[1] = DIM_LUT[src_px[1] as usize];
     dst_px[2] = DIM_LUT[src_px[2] as usize];
     dst_px[3] = src_px[3];
   }
+}
 
+pub fn dimmed_copy(frame: &Pixmap) -> Pixmap {
+  let mut out =
+    Pixmap::new(frame.width(), frame.height()).expect("valid frame dimensions");
+  dimmed_into(&mut out, frame);
   out
 }
 
@@ -525,7 +532,7 @@ fn draw_badge(pm: &mut Pixmap, sel: Rect, bounds: Rect, engine: &TextEngine) {
   if by < bounds.y {
     by = sel.y + BADGE_GAP;
   }
-  bx = bx.clamp(bounds.x, (bounds.right() - box_w).max(bounds.x));
+  bx = clamp_span(bx, box_w, bounds.x, bounds.right());
 
   draw::rounded_fill(
     pm,
@@ -636,8 +643,8 @@ fn tooltip_rect(
       (area.center().x - w * 0.5, y)
     }
   };
-  bx = bx.clamp(bounds.x, (bounds.right() - w).max(bounds.x));
-  let by = by.clamp(bounds.y, (bounds.bottom() - h).max(bounds.y));
+  bx = clamp_span(bx, w, bounds.x, bounds.right());
+  let by = clamp_span(by, h, bounds.y, bounds.bottom());
   Rect::new(bx, by, w, h)
 }
 
@@ -679,6 +686,18 @@ mod tests {
     assert_eq!(px[0], ((200 * 150 + 127) / 255) as u8);
     assert_eq!(px[3], 255);
     assert_eq!(px[7], 128);
+  }
+
+  #[test]
+  fn dimmed_into_overwrites_an_existing_buffer() {
+    let mut src = Pixmap::new(2, 1).unwrap();
+    src
+      .data_mut()
+      .copy_from_slice(&[200, 100, 50, 255, 10, 20, 30, 128]);
+    let mut dst = Pixmap::new(2, 1).unwrap();
+    dst.data_mut().iter_mut().for_each(|b| *b = 77);
+    dimmed_into(&mut dst, &src);
+    assert_eq!(dst.data(), dimmed_copy(&src).data());
   }
 
   #[test]
@@ -763,6 +782,31 @@ mod tests {
     );
     assert!(chrome.tools.iter().all(|b| b.area.w == 0.0));
     assert!(chrome.actions.iter().all(|b| b.area.w == 0.0));
+  }
+
+  #[test]
+  fn build_is_idempotent_for_an_unchanged_signature() {
+    let sel = Rect::new(10.0, 10.0, 200.0, 150.0);
+    let bounds = Rect::new(0.0, 0.0, 1920.0, 1080.0);
+    let mut chrome = Chrome::default();
+    build(
+      &mut chrome,
+      Some(sel),
+      bounds,
+      Tool::Pen,
+      &History::default(),
+      true,
+    );
+    let before = chrome.tools[0].area;
+    build(
+      &mut chrome,
+      Some(sel),
+      bounds,
+      Tool::Pen,
+      &History::default(),
+      true,
+    );
+    assert_eq!(chrome.tools[0].area, before);
   }
 
   #[test]

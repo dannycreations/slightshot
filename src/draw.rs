@@ -1,11 +1,14 @@
-use std::{cell::RefCell, collections::HashMap, sync::OnceLock};
+use std::{cell::RefCell, sync::OnceLock};
 
 use tiny_skia::{
   Color, FillRule, LineCap, LineJoin, Paint, Path, PathBuilder, Pixmap,
   PixmapPaint, Rect, Shader, Stroke, StrokeDash, Transform,
 };
 
-use crate::geom::{Point, Rect as GeoRect};
+use crate::{
+  cache::FastMap,
+  geom::{Point, Rect as GeoRect},
+};
 
 #[inline(always)]
 fn skia_rect(rect: GeoRect) -> Option<Rect> {
@@ -29,6 +32,14 @@ fn stroke(width: f32) -> Stroke {
     line_join: LineJoin::Round,
     ..Stroke::default()
   }
+}
+
+#[inline]
+fn rect_path(rect: GeoRect) -> Option<Path> {
+  let r = skia_rect(rect)?;
+  let mut path = PathBuilder::new();
+  path.push_rect(r);
+  path.finish()
 }
 
 pub fn polyline(
@@ -135,12 +146,7 @@ pub fn rect_stroke(
   width: f32,
   alpha: u8,
 ) {
-  let Some(r) = skia_rect(rect) else {
-    return;
-  };
-  let mut path = PathBuilder::new();
-  path.push_rect(r);
-  let Some(path) = path.finish() else {
+  let Some(path) = rect_path(rect) else {
     return;
   };
   pm.stroke_path(
@@ -166,12 +172,7 @@ pub fn rect_fill(pm: &mut Pixmap, rect: GeoRect, rgb: [u8; 3], alpha: u8) {
 }
 
 pub fn dashed_rect(pm: &mut Pixmap, rect: GeoRect, rgb: [u8; 3], width: f32) {
-  let Some(r) = skia_rect(rect) else {
-    return;
-  };
-  let mut path = PathBuilder::new();
-  path.push_rect(r);
-  let Some(path) = path.finish() else {
+  let Some(path) = rect_path(rect) else {
     return;
   };
   static DASH_STROKE: OnceLock<Stroke> = OnceLock::new();
@@ -182,17 +183,21 @@ pub fn dashed_rect(pm: &mut Pixmap, rect: GeoRect, rgb: [u8; 3], width: f32) {
     s.dash = StrokeDash::new(vec![3.0, 3.0], 0.0);
     s
   });
-  let stroke = if width == 1.0 {
-    base_stroke.clone()
+  let widened;
+  let stroke_ref: &Stroke = if width == 1.0 {
+    base_stroke
   } else {
-    let mut s = base_stroke.clone();
-    s.width = width;
-    s
+    widened = {
+      let mut s = base_stroke.clone();
+      s.width = width;
+      s
+    };
+    &widened
   };
   pm.stroke_path(
     &path,
     &paint(rgb[0], rgb[1], rgb[2], 255),
-    &stroke,
+    stroke_ref,
     Transform::identity(),
     None,
   );
@@ -214,6 +219,32 @@ fn round_rect_path(r: Rect, radius: f32) -> Option<Path> {
   path.finish()
 }
 
+type RoundRectKey = (u32, u32, u32);
+
+thread_local! {
+  static ROUND_RECT_CACHE: RefCell<FastMap<RoundRectKey, Path>> =
+    RefCell::new(FastMap::with_capacity_and_hasher(16, Default::default()));
+}
+
+fn cached_round_rect_geometry(w: f32, h: f32, radius: f32) -> Option<Path> {
+  let key = (w.to_bits(), h.to_bits(), radius.to_bits());
+  ROUND_RECT_CACHE.with(|cache| {
+    if let Some(path) = cache.borrow().get(&key) {
+      return Some(path.clone());
+    }
+    let r = Rect::from_xywh(0.0, 0.0, w, h)?;
+    let path = round_rect_path(r, radius)?;
+    cache.borrow_mut().insert(key, path.clone());
+    Some(path)
+  })
+}
+
+#[inline]
+fn rounded_path(rect: GeoRect, radius: f32) -> Option<(Path, Transform)> {
+  let path = cached_round_rect_geometry(rect.w, rect.h, radius)?;
+  Some((path, Transform::from_translate(rect.x, rect.y)))
+}
+
 pub fn rounded_fill(
   pm: &mut Pixmap,
   rect: GeoRect,
@@ -221,17 +252,14 @@ pub fn rounded_fill(
   rgb: [u8; 3],
   alpha: u8,
 ) {
-  let Some(r) = Rect::from_xywh(0.0, 0.0, rect.w, rect.h) else {
-    return;
-  };
-  let Some(path) = round_rect_path(r, radius) else {
+  let Some((path, transform)) = rounded_path(rect, radius) else {
     return;
   };
   pm.fill_path(
     &path,
     &paint(rgb[0], rgb[1], rgb[2], alpha),
     FillRule::Winding,
-    Transform::from_translate(rect.x, rect.y),
+    transform,
     None,
   );
 }
@@ -244,17 +272,14 @@ pub fn rounded_stroke(
   width: f32,
   alpha: u8,
 ) {
-  let Some(r) = Rect::from_xywh(0.0, 0.0, rect.w, rect.h) else {
-    return;
-  };
-  let Some(path) = round_rect_path(r, radius) else {
+  let Some((path, transform)) = rounded_path(rect, radius) else {
     return;
   };
   pm.stroke_path(
     &path,
     &paint(rgb[0], rgb[1], rgb[2], alpha),
     &stroke(width),
-    Transform::from_translate(rect.x, rect.y),
+    transform,
     None,
   );
 }
@@ -288,10 +313,11 @@ impl Icon {
   }
 }
 
-type TintCache = HashMap<(usize, [u8; 3], u32), Pixmap>;
+type TintCache = FastMap<(usize, [u8; 3], u32), Pixmap>;
 
 thread_local! {
-  static TINT_CACHE: RefCell<TintCache> = RefCell::new(HashMap::new());
+  static TINT_CACHE: RefCell<TintCache> =
+    RefCell::new(FastMap::with_capacity_and_hasher(64, Default::default()));
 }
 
 fn create_tinted_sprite(icon: Icon, color: [u8; 3], box_size: f32) -> Pixmap {
@@ -442,5 +468,51 @@ mod tests {
       }
     }
     assert!(lit > 20, "icon missing at large coords: lit={lit}");
+  }
+
+  #[test]
+  fn dashed_rect_and_rect_stroke_share_the_same_path_helper() {
+    let mut a = Pixmap::new(20, 20).expect("alloc");
+    let mut b = Pixmap::new(20, 20).expect("alloc");
+    let r = GeoRect::new(2.0, 2.0, 10.0, 10.0);
+    rect_stroke(&mut a, r, [255, 255, 255], 1.0, 255);
+    dashed_rect(&mut b, r, [255, 255, 255], 1.0);
+    assert!(a.data().iter().any(|&p| p != 0));
+    assert!(b.data().iter().any(|&p| p != 0));
+  }
+
+  #[test]
+  fn rounded_geometry_is_cached_and_reused_across_positions() {
+    let mut a = Pixmap::new(20, 20).expect("alloc");
+    let mut b = Pixmap::new(20, 20).expect("alloc");
+    rounded_fill(
+      &mut a,
+      GeoRect::new(1.0, 1.0, 10.0, 10.0),
+      3.0,
+      [1, 2, 3],
+      255,
+    );
+    rounded_fill(
+      &mut b,
+      GeoRect::new(5.0, 5.0, 10.0, 10.0),
+      3.0,
+      [1, 2, 3],
+      255,
+    );
+    // Same cached geometry, different translation: both should still paint.
+    assert!(a.data().iter().any(|&p| p != 0));
+    assert!(b.data().iter().any(|&p| p != 0));
+  }
+
+  #[test]
+  fn dashed_rect_at_nondefault_width_still_paints() {
+    let mut pm = Pixmap::new(20, 20).expect("alloc");
+    dashed_rect(
+      &mut pm,
+      GeoRect::new(2.0, 2.0, 10.0, 10.0),
+      [255, 255, 255],
+      2.5,
+    );
+    assert!(pm.data().iter().any(|&p| p != 0));
   }
 }

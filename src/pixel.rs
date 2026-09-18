@@ -1,26 +1,20 @@
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
-use std::slice;
-#[cfg(target_arch = "x86_64")]
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::{slice, sync::OnceLock};
 
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
 fn get_simd_level() -> u8 {
-  static LEVEL: AtomicU8 = AtomicU8::new(0);
-  let lvl = LEVEL.load(Ordering::Relaxed);
-  if lvl != 0 {
-    return lvl;
-  }
-  let detected = if is_x86_feature_detected!("avx2") {
-    3
-  } else if is_x86_feature_detected!("ssse3") {
-    2
-  } else {
-    1
-  };
-  LEVEL.store(detected, Ordering::Relaxed);
-  detected
+  static LEVEL: OnceLock<u8> = OnceLock::new();
+  *LEVEL.get_or_init(|| {
+    if is_x86_feature_detected!("avx2") {
+      3
+    } else if is_x86_feature_detected!("ssse3") {
+      2
+    } else {
+      1
+    }
+  })
 }
 
 #[cfg(target_arch = "x86_64")]

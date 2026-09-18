@@ -108,7 +108,13 @@ pub fn grab() -> Result<ScreenShot> {
 
     let size = IntSize::from_wh(width as u32, height as u32)
       .context("invalid capture dimensions")?;
-    let mut data = vec![0u8; pixels];
+
+    let mut data: Vec<u8> = Vec::with_capacity(pixels);
+    // SAFETY: `u8` has no invalid bit patterns, and the `swap_channels` call
+    // immediately below unconditionally overwrites every element in `0..pixels`,
+    // so the vector is fully initialized before anything reads from it.
+    #[allow(clippy::uninit_vec)]
+    data.set_len(pixels);
 
     let raw = slice::from_raw_parts(bits as *const u8, pixels);
     swap_channels(raw, &mut data);
