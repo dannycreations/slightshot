@@ -65,8 +65,8 @@ impl TextEngine {
     })
   }
 
-  fn glyph_info(&self, ch: char, size: f32, size_bits: u32) -> GlyphInfo {
-    match self.glyphs.borrow_mut().entry((ch, size_bits)) {
+  fn glyph_info(&self, ch: char, size: f32) -> GlyphInfo {
+    match self.glyphs.borrow_mut().entry((ch, size.to_bits())) {
       Entry::Occupied(entry) => entry.get().clone(),
       Entry::Vacant(entry) => {
         let (metrics, coverage) = self.font.rasterize(ch, size);
@@ -94,12 +94,11 @@ impl TextEngine {
     size: f32,
     rgb: [u8; 3],
   ) {
-    let size_bits = size.to_bits();
     let baseline = y + size * ASCENT_RATIO;
     let mut pen = x;
 
     for ch in text.chars() {
-      let info = self.glyph_info(ch, size, size_bits);
+      let info = self.glyph_info(ch, size);
       let m = &info.metrics;
       if m.width > 0 && m.height > 0 {
         let left = pen + m.xmin as f32;
@@ -121,10 +120,9 @@ impl TextEngine {
   }
 
   pub fn width(&self, text: &str, size: f32) -> f32 {
-    let size_bits = size.to_bits();
     text
       .chars()
-      .map(|ch| self.glyph_info(ch, size, size_bits).metrics.advance_width)
+      .map(|ch| self.glyph_info(ch, size).metrics.advance_width)
       .sum()
   }
 

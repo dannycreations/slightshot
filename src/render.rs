@@ -104,6 +104,16 @@ impl Default for Chrome {
   }
 }
 
+impl Chrome {
+  fn hovered(&self, hotspot: Option<Hotspot>) -> Option<(&Button, Side)> {
+    match hotspot {
+      Some(Hotspot::Tool(i)) => self.tools.get(i).map(|b| (b, Side::Left)),
+      Some(Hotspot::Action(i)) => self.actions.get(i).map(|b| (b, Side::Above)),
+      None => None,
+    }
+  }
+}
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Hotspot {
   Tool(usize),
@@ -128,15 +138,11 @@ pub fn build(
 
   for b in chrome.tools.iter_mut().chain(&mut chrome.actions) {
     b.enabled = b.command.enabled(ready, can_undo);
-    if let Command::Tool(active) = b.command {
-      b.active = active == tool;
-    }
+    b.active = matches!(b.command, Command::Tool(active) if active == tool);
+    b.area = Rect::ZERO;
   }
 
   let Some(sel) = selection.filter(|_| show_chrome) else {
-    for b in chrome.tools.iter_mut().chain(&mut chrome.actions) {
-      b.area = Rect::ZERO;
-    }
     return;
   };
   layout_panel(&mut chrome.tools, sel, bounds, Axis::Vertical);
@@ -232,19 +238,8 @@ pub fn paint(pm: &mut Pixmap, scene: &Scene) {
   if width == 0 || height == 0 {
     return;
   }
-  let px_w = pm.width() as usize;
-  blit(
-    pm.data_mut(),
-    px_w,
-    x0 as usize,
-    y0 as usize,
-    scene.inked_canvas.data(),
-    scene.inked_canvas.width() as usize,
-    x0 as usize,
-    y0 as usize,
-    width as usize,
-    height as usize,
-  );
+  let at = (x0, y0);
+  copy_region(pm, scene.inked_canvas, at, at, (width, height));
   draw_live(pm, scene);
   draw::dashed_rect(pm, sel, [255, 255, 255]);
   draw_handles(pm, sel);
@@ -292,44 +287,38 @@ pub fn dimmed_copy(frame: &Pixmap) -> Pixmap {
   out
 }
 
-/// Copies a `width` by `height` pixel block. Both callers reject an empty
-/// region before calling, so the block always covers at least one pixel.
-#[allow(clippy::too_many_arguments)]
-fn blit(
-  dest: &mut [u8],
-  dest_stride_px: usize,
-  dest_x: usize,
-  dest_y: usize,
-  source: &[u8],
-  source_stride_px: usize,
-  source_x: usize,
-  source_y: usize,
-  width: usize,
-  height: usize,
+fn copy_region(
+  dest: &mut Pixmap,
+  source: &Pixmap,
+  from: (u32, u32),
+  to: (u32, u32),
+  size: (u32, u32),
 ) {
-  let row_bytes = width * 4;
-  let src_stride_bytes = source_stride_px * 4;
-  let dst_stride_bytes = dest_stride_px * 4;
+  let (from_x, from_y) = from;
+  let (to_x, to_y) = to;
+  let (width, height) = size;
+  let row_bytes = width as usize * 4;
+  let src_stride = source.width() as usize * 4;
+  let dst_stride = dest.width() as usize * 4;
+  let (src, dst) = (source.data(), dest.data_mut());
+  let src_row = from_y as usize * src_stride + from_x as usize * 4;
+  let dst_row = to_y as usize * dst_stride + to_x as usize * 4;
 
-  if row_bytes == src_stride_bytes
-    && row_bytes == dst_stride_bytes
-    && dest_x == 0
-    && source_x == 0
+  if from_x == 0
+    && to_x == 0
+    && row_bytes == src_stride
+    && row_bytes == dst_stride
   {
-    let total = row_bytes * height;
-    let dst_start = dest_y * dst_stride_bytes;
-    let src_start = source_y * src_stride_bytes;
-    dest[dst_start..dst_start + total]
-      .copy_from_slice(&source[src_start..src_start + total]);
+    let total = row_bytes * height as usize;
+    dst[dst_row..dst_row + total]
+      .copy_from_slice(&src[src_row..src_row + total]);
     return;
   }
 
-  let mut src = (source_y * source_stride_px + source_x) * 4;
-  let mut dst = (dest_y * dest_stride_px + dest_x) * 4;
-  for _ in 0..height {
-    dest[dst..dst + row_bytes].copy_from_slice(&source[src..src + row_bytes]);
-    src += src_stride_bytes;
-    dst += dst_stride_bytes;
+  for row in 0..height as usize {
+    let s = src_row + row * src_stride;
+    let d = dst_row + row * dst_stride;
+    dst[d..d + row_bytes].copy_from_slice(&src[s..s + row_bytes]);
   }
 }
 
@@ -368,18 +357,7 @@ pub fn flatten(frame: &Pixmap, sel: Rect) -> Shot {
   let Some(mut layer) = Pixmap::new(width, height) else {
     return Shot::empty();
   };
-  blit(
-    layer.data_mut(),
-    width as usize,
-    0,
-    0,
-    frame.data(),
-    frame.width() as usize,
-    x0 as usize,
-    y0 as usize,
-    width as usize,
-    height as usize,
-  );
+  copy_region(&mut layer, frame, (x0, y0), (0, 0), (width, height));
   Shot {
     width,
     height,
@@ -502,12 +480,7 @@ fn draw_panels(pm: &mut Pixmap, scene: &Scene) {
     draw_button(pm, button, hovered, swatch);
   }
 
-  let (hovered_btn, side) = match scene.hotspot {
-    Some(Hotspot::Tool(i)) => (scene.chrome.tools.get(i), Side::Left),
-    Some(Hotspot::Action(i)) => (scene.chrome.actions.get(i), Side::Above),
-    None => (None, Side::Left),
-  };
-  if let Some(button) = hovered_btn {
+  if let Some((button, side)) = scene.chrome.hovered(scene.hotspot) {
     draw_tooltip(
       pm,
       button.area,
@@ -621,7 +594,6 @@ fn draw_tooltip(
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::geom::Rect;
 
   #[test]
   fn dimmed_copy_darkens_rgb_and_keeps_alpha() {
@@ -844,6 +816,27 @@ mod tests {
     let rows: Vec<u8> =
       shot.rgba.as_chunks::<4>().0.iter().map(|p| p[0]).collect();
     assert_eq!(rows, vec![5, 6, 9, 10]);
+  }
+
+  #[test]
+  fn flatten_rebases_a_full_width_region_onto_the_origin() {
+    let mut frame = Pixmap::new(4, 4).unwrap();
+    for (row, px) in frame
+      .data_mut()
+      .as_chunks_mut::<4>()
+      .0
+      .iter_mut()
+      .enumerate()
+    {
+      px.copy_from_slice(&[row as u8, 0, 0, 255]);
+    }
+    // Rows 2 and 3, full width: one straight copy, but it must start at
+    // source row 2 rather than row 0.
+    let shot = flatten(&frame, Rect::new(0.0, 2.0, 4.0, 2.0));
+    assert_eq!((shot.width, shot.height), (4, 2));
+    let rows: Vec<u8> =
+      shot.rgba.as_chunks::<4>().0.iter().map(|p| p[0]).collect();
+    assert_eq!(rows, vec![8, 9, 10, 11, 12, 13, 14, 15]);
   }
 
   #[test]

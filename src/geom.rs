@@ -31,7 +31,7 @@ pub fn clamp_span(value: f32, len: f32, min: f32, max: f32) -> f32 {
   value.clamp(min, (max - len).max(min))
 }
 
-#[derive(Clone, Copy, PartialEq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Rect {
   pub x: f32,
   pub y: f32,

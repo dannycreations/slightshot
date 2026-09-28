@@ -385,7 +385,6 @@ fn load_sprite(bytes: &'static [u8]) -> Pixmap {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::geom::Rect as GeoRect;
 
   #[test]
   fn polyline_changes_pixels_on_the_canvas() {

@@ -44,7 +44,7 @@ use crate::{
 
 const HINT_DURATION: Duration = Duration::from_millis(800);
 
-pub enum Outcome {
+enum Outcome {
   Close,
   Deliver {
     deliverable: Deliverable,
@@ -52,9 +52,7 @@ pub enum Outcome {
   },
 }
 
-#[derive(Default)]
 enum Mode {
-  #[default]
   Idle,
   Rubber(Point),
   Draw(Shape, Point),
@@ -182,7 +180,6 @@ impl ApplicationHandler<Trigger> for App {
                 self.finish(outcome);
               }
             } else if (ch.as_str() == "[" || ch.as_str() == "]")
-              && session.tool.is_annotation()
               && !session.is_typing()
             {
               let delta = if ch.as_str() == "]" {
@@ -295,8 +292,6 @@ impl Session {
     let frame = Pixmap::new(canvas.width(), canvas.height())
       .expect("frame allocation failed");
 
-    let sizes = TOOLS.map(Tool::default_size);
-
     let mut session = Self {
       window,
       canvas,
@@ -316,7 +311,7 @@ impl Session {
       hover: None,
       chrome: Chrome::default(),
       modifiers: ModifiersState::default(),
-      sizes,
+      sizes: TOOLS.map(Tool::default_size),
       hint: None,
       hint_until: None,
       current_cursor: CursorIcon::default(),
@@ -502,39 +497,18 @@ impl Session {
     let color = active_color(self.palette_index);
     let width = self.size(tool);
     match tool {
-      Tool::Pen => {
-        let mut points = Vec::with_capacity(64);
-        points.push(p);
-        Shape::Stroke {
-          points,
-          color,
-          width,
-          marker: false,
-        }
-      }
-      Tool::Marker => {
-        let mut points = Vec::with_capacity(64);
-        points.push(p);
-        Shape::Stroke {
-          points,
-          color,
-          width,
-          marker: true,
-        }
-      }
-      Tool::Line => Shape::Line {
-        from: p,
-        to: p,
+      Tool::Pen | Tool::Marker => Shape::Stroke {
+        points: vec![p],
         color,
         width,
-        arrow: false,
+        marker: tool == Tool::Marker,
       },
-      Tool::Arrow => Shape::Line {
+      Tool::Line | Tool::Arrow => Shape::Line {
         from: p,
         to: p,
         color,
         width,
-        arrow: true,
+        arrow: tool == Tool::Arrow,
       },
       Tool::Box => Shape::Outline {
         rect: Rect::new(p.x, p.y, 0.0, 0.0),
@@ -697,7 +671,7 @@ fn format_size(size: f32) -> String {
   }
 }
 
-pub fn extend_draft(anchor: Point, draft: &mut Shape, p: Point) -> bool {
+fn extend_draft(anchor: Point, draft: &mut Shape, p: Point) -> bool {
   match draft {
     Shape::Stroke { points, .. } => {
       if points
@@ -730,7 +704,7 @@ pub fn extend_draft(anchor: Point, draft: &mut Shape, p: Point) -> bool {
   }
 }
 
-pub fn resize_cursor(handle: Handle) -> CursorIcon {
+fn resize_cursor(handle: Handle) -> CursorIcon {
   match handle {
     Handle::TopLeft | Handle::BottomRight => CursorIcon::NwseResize,
     Handle::BottomLeft | Handle::TopRight => CursorIcon::NeswResize,
@@ -742,7 +716,7 @@ pub fn resize_cursor(handle: Handle) -> CursorIcon {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::geom::{handle_anchor, hit_handle, Rect as GeoRect, HANDLES};
+  use crate::geom::{handle_anchor, HANDLES};
 
   #[test]
   fn extend_draft_appends_to_paths_and_resizes_boxes() {
@@ -764,7 +738,7 @@ mod tests {
     );
 
     let mut boxed = Shape::Outline {
-      rect: GeoRect::new(10.0, 20.0, 0.0, 0.0),
+      rect: Rect::new(10.0, 20.0, 0.0, 0.0),
       color: [0, 0, 0],
       width: 2.0,
     };
@@ -772,7 +746,7 @@ mod tests {
     assert_eq!(
       boxed,
       Shape::Outline {
-        rect: GeoRect::new(10.0, 20.0, 30.0, 40.0),
+        rect: Rect::new(10.0, 20.0, 30.0, 40.0),
         color: [0, 0, 0],
         width: 2.0,
       }
@@ -799,7 +773,7 @@ mod tests {
 
   #[test]
   fn every_handle_is_hit_at_its_anchor() {
-    let sel = GeoRect::new(10.0, 10.0, 100.0, 100.0);
+    let sel = Rect::new(10.0, 10.0, 100.0, 100.0);
     for &h in &HANDLES {
       let anchor = handle_anchor(sel, h);
       assert_eq!(hit_handle(sel, anchor, HANDLE_SLOP), Some(h));

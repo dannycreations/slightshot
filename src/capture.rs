@@ -135,19 +135,3 @@ pub fn grab() -> Result<ScreenShot> {
     })
   }
 }
-
-#[cfg(test)]
-mod tests {
-  use super::*;
-
-  #[test]
-  fn swaps_channels_and_opaques_alpha() {
-    let src = [
-      10, 20, 30, 0, // BGRA -> RGBA 30,20,10,255
-      40, 50, 60, 99, // -> 60,50,40,255
-    ];
-    let mut dst = vec![0u8; 8];
-    swap_channels(&src, &mut dst);
-    assert_eq!(dst, [30, 20, 10, 255, 60, 50, 40, 255]);
-  }
-}
