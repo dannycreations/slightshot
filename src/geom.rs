@@ -40,6 +40,8 @@ pub struct Rect {
 }
 
 impl Rect {
+  pub const ZERO: Rect = Rect::new(0.0, 0.0, 0.0, 0.0);
+
   #[inline(always)]
   pub const fn new(x: f32, y: f32, w: f32, h: f32) -> Self {
     Self { x, y, w, h }

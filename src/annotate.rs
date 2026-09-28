@@ -129,22 +129,18 @@ pub struct History {
 }
 
 impl History {
-  #[inline]
   pub fn push(&mut self, shape: Shape) {
     self.applied.push(shape);
   }
 
-  #[inline]
   pub fn undo(&mut self) -> bool {
     self.applied.pop().is_some()
   }
 
-  #[inline(always)]
   pub fn shapes(&self) -> &[Shape] {
     &self.applied
   }
 
-  #[inline(always)]
   pub fn can_undo(&self) -> bool {
     !self.applied.is_empty()
   }

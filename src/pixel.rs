@@ -114,6 +114,10 @@ pub fn swap_channels(src: &[u8], dst: &mut [u8]) {
       3 => {
         let simd_bytes = total_bytes & !31;
         if simd_bytes > 0 {
+          // SAFETY: `get_simd_level` only returns 3 after confirming avx2 is
+          // available, and `simd_bytes` is a whole number of 32-byte vectors
+          // that fits inside both slices, so every load and store below stays
+          // in bounds and the unaligned variants need no alignment.
           unsafe {
             swap_channels_avx2(src.as_ptr(), dst.as_mut_ptr(), simd_bytes);
           }
@@ -123,6 +127,8 @@ pub fn swap_channels(src: &[u8], dst: &mut [u8]) {
       2 => {
         let simd_bytes = total_bytes & !15;
         if simd_bytes > 0 {
+          // SAFETY: same argument as the avx2 branch, with ssse3 and 16-byte
+          // vectors.
           unsafe {
             swap_channels_ssse3(src.as_ptr(), dst.as_mut_ptr(), simd_bytes);
           }
@@ -152,6 +158,9 @@ pub fn swap_channels(src: &[u8], dst: &mut [u8]) {
 
 #[inline(always)]
 pub fn swap_channels_to_words(src: &[u8], dst: &mut [u32]) {
+  // SAFETY: a `u32` is 4 bytes with no padding and no invalid bit patterns, so
+  // the word slice is valid as `dst.len() * 4` bytes and `swap_channels` only
+  // writes whole pixels, staying inside that range.
   let dst_bytes = unsafe {
     slice::from_raw_parts_mut(dst.as_mut_ptr() as *mut u8, dst.len() * 4)
   };

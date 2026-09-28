@@ -20,7 +20,7 @@ use windows::{
 use winit::{
   application::ApplicationHandler,
   dpi::{PhysicalPosition, PhysicalSize},
-  event::{ElementState, KeyEvent, MouseButton, WindowEvent},
+  event::{ElementState, MouseButton, WindowEvent},
   event_loop::{ActiveEventLoop, ControlFlow},
   keyboard::{Key, ModifiersState, NamedKey},
   platform::windows::WindowAttributesExtWindows,
@@ -73,6 +73,14 @@ impl Mode {
   }
 
   #[inline(always)]
+  fn typing(&self, label_size: f32) -> Option<(Point, &str, f32)> {
+    match self {
+      Mode::Type(buffer, at) => Some((*at, buffer.as_str(), label_size)),
+      _ => None,
+    }
+  }
+
+  #[inline(always)]
   fn shows_chrome(&self) -> bool {
     matches!(self, Mode::Idle | Mode::Draw(_, _) | Mode::Type(_, _))
   }
@@ -99,7 +107,7 @@ struct Session {
   hover: Option<Hotspot>,
   chrome: Chrome,
   modifiers: ModifiersState,
-  sizes: [f32; 7],
+  sizes: [f32; TOOLS.len()],
   hint: Option<String>,
   hint_until: Option<Instant>,
   current_cursor: CursorIcon,
@@ -154,66 +162,42 @@ impl ApplicationHandler<Trigger> for App {
         button: MouseButton::Left,
         ..
       } => session.mouse_up(),
-      WindowEvent::KeyboardInput {
-        event:
-          KeyEvent {
-            state: ElementState::Pressed,
-            logical_key: Key::Named(NamedKey::Escape),
-            ..
-          },
-        ..
-      } => self.session = None,
-      WindowEvent::KeyboardInput {
-        event:
-          KeyEvent {
-            state: ElementState::Pressed,
-            logical_key: Key::Named(NamedKey::Enter),
-            ..
-          },
-        ..
-      } => {
-        if let Some(outcome) = session.commit_label() {
-          self.finish(outcome);
+      WindowEvent::KeyboardInput { event, .. } => {
+        if event.state != ElementState::Pressed {
+          return;
         }
-      }
-      WindowEvent::KeyboardInput {
-        event:
-          KeyEvent {
-            state: ElementState::Pressed,
-            logical_key: Key::Character(ch),
-            ..
-          },
-        ..
-      } => {
-        if ch.as_str().eq_ignore_ascii_case("c")
-          && session.modifiers.control_key()
-        {
-          if let Some(outcome) = session.deliver(Deliverable::Copy) {
-            self.finish(outcome);
+        match event.logical_key {
+          Key::Named(NamedKey::Escape) => self.session = None,
+          Key::Named(NamedKey::Enter) => {
+            if let Some(outcome) = session.commit_label() {
+              self.finish(outcome);
+            }
           }
-        } else if (ch.as_str() == "[" || ch.as_str() == "]")
-          && session.tool.is_annotation()
-          && !session.is_typing()
-        {
-          let delta = if ch.as_str() == "]" {
-            SIZE_STEP
-          } else {
-            -SIZE_STEP
-          };
-          session.adjust_size(delta);
-        } else {
-          session.type_char(ch.as_str());
+          Key::Named(NamedKey::Backspace) => session.backspace(),
+          Key::Character(ch) => {
+            if ch.as_str().eq_ignore_ascii_case("c")
+              && session.modifiers.control_key()
+            {
+              if let Some(outcome) = session.deliver(Deliverable::Copy) {
+                self.finish(outcome);
+              }
+            } else if (ch.as_str() == "[" || ch.as_str() == "]")
+              && session.tool.is_annotation()
+              && !session.is_typing()
+            {
+              let delta = if ch.as_str() == "]" {
+                SIZE_STEP
+              } else {
+                -SIZE_STEP
+              };
+              session.adjust_size(delta);
+            } else {
+              session.type_char(ch.as_str());
+            }
+          }
+          _ => {}
         }
       }
-      WindowEvent::KeyboardInput {
-        event:
-          KeyEvent {
-            state: ElementState::Pressed,
-            logical_key: Key::Named(NamedKey::Backspace),
-            ..
-          },
-        ..
-      } => session.backspace(),
       _ => {}
     }
   }
@@ -280,6 +264,10 @@ impl Session {
     if let Ok(handle) = window.window_handle() {
       if let RawWindowHandle::Win32(w) = handle.as_raw() {
         let hwnd = HWND(w.hwnd.get() as *mut c_void);
+        // SAFETY: `hwnd` comes from the window this function just created and
+        // outlives both calls. Setting a null class background brush stops the
+        // window from painting over the frame we blit ourselves, and the DWM
+        // attribute is a plain value write to our own window.
         unsafe {
           SetClassLongPtrW(hwnd, GCLP_HBRBACKGROUND, 0);
           let disable: BOOL = TRUE;
@@ -387,7 +375,7 @@ impl Session {
     let inked_backdrop = self.inked_backdrop.as_ref().unwrap_or(&self.backdrop);
     let inked_canvas = self.inked_canvas.as_ref().unwrap_or(&self.canvas);
     let draft = self.mode.draft();
-    let typing = Self::typing(&self.mode, self.size(Tool::Label));
+    let typing = self.mode.typing(self.size(Tool::Label));
     let text = &self.engine;
 
     let frame = &mut self.frame;
@@ -420,15 +408,6 @@ impl Session {
     let _ = buffer.present();
   }
 
-  #[inline(always)]
-  fn typing(mode: &Mode, label_size: f32) -> Option<(Point, &str, f32)> {
-    if let Mode::Type(buffer, anchor) = mode {
-      Some((*anchor, buffer.as_str(), label_size))
-    } else {
-      None
-    }
-  }
-
   fn mouse_move(&mut self, position: PhysicalPosition<f64>) {
     let p = Point::new(position.x as f32, position.y as f32);
     if self.cursor == p {
@@ -436,25 +415,25 @@ impl Session {
     }
     self.cursor = p;
     let previous = self.hover;
-    self.hover = (self.mode.shows_chrome() && self.selection.is_some())
-      .then(|| render::hotspot_at(&self.chrome, p))
-      .flatten();
+    self.hover = if self.mode.shows_chrome() && self.selection.is_some() {
+      render::hotspot_at(&self.chrome, p)
+    } else {
+      None
+    };
     if self.hover != previous {
       self.window.request_redraw();
     }
     match &mut self.mode {
       Mode::Idle => {
-        if self.tool == Tool::Select {
-          if let Some(sel) = self.selection {
-            match hit_handle(sel, p, HANDLE_SLOP) {
-              Some(handle) => self.update_cursor(resize_cursor(handle)),
-              None if sel.contains(p) => self.update_cursor(CursorIcon::Move),
-              None => self.update_cursor(CursorIcon::default()),
-            }
-          }
-        } else {
-          self.update_cursor(CursorIcon::default());
-        }
+        let icon = match (self.tool, self.selection) {
+          (Tool::Select, Some(sel)) => match hit_handle(sel, p, HANDLE_SLOP) {
+            Some(handle) => resize_cursor(handle),
+            None if sel.contains(p) => CursorIcon::Move,
+            None => CursorIcon::default(),
+          },
+          _ => CursorIcon::default(),
+        };
+        self.update_cursor(icon);
       }
       Mode::Rubber(anchor) => {
         let new_sel = Rect::spanning(*anchor, p);
@@ -601,8 +580,10 @@ impl Session {
   fn deliver(&self, deliverable: Deliverable) -> Option<Outcome> {
     let sel = render::deliverable_region(self.selection)?;
     let source = self.inked_canvas.as_ref().unwrap_or(&self.canvas);
-    let shot = render::flatten(source, sel, &[], &self.engine);
-    Some(Outcome::Deliver { deliverable, shot })
+    Some(Outcome::Deliver {
+      deliverable,
+      shot: render::flatten(source, sel),
+    })
   }
 
   fn ink_shape(&mut self, shape: &Shape) {
@@ -688,16 +669,15 @@ impl Session {
     self.sizes[tool as usize]
   }
 
-  #[inline(always)]
   fn is_typing(&self) -> bool {
-    matches!(self.mode, Mode::Type(..))
+    matches!(self.mode, Mode::Type(_, _))
   }
 
   fn adjust_size(&mut self, delta: f32) {
-    let tool = self.tool;
-    if !tool.is_annotation() {
+    if !self.tool.is_annotation() {
       return;
     }
+    let tool = self.tool;
     let next = (self.size(tool) + delta).clamp(MIN_SIZE, MAX_SIZE);
     self.sizes[tool as usize] = next;
     if let Mode::Draw(shape, _) = &mut self.mode {
@@ -730,7 +710,7 @@ pub fn extend_draft(anchor: Point, draft: &mut Shape, p: Point) -> bool {
         false
       }
     }
-    Shape::Line { to, .. } => {
+    Shape::Line { to, .. } | Shape::Caption { at: to, .. } => {
       if *to != p {
         *to = p;
         true
@@ -742,14 +722,6 @@ pub fn extend_draft(anchor: Point, draft: &mut Shape, p: Point) -> bool {
       let new_rect = Rect::spanning(anchor, p);
       if *rect != new_rect {
         *rect = new_rect;
-        true
-      } else {
-        false
-      }
-    }
-    Shape::Caption { at, .. } => {
-      if *at != p {
-        *at = p;
         true
       } else {
         false

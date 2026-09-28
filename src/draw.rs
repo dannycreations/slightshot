@@ -1,14 +1,11 @@
-use std::{cell::RefCell, sync::OnceLock};
+use std::{cell::RefCell, collections::HashMap, sync::OnceLock};
 
 use tiny_skia::{
   Color, FillRule, LineCap, LineJoin, Paint, Path, PathBuilder, Pixmap,
   PixmapPaint, Rect, Shader, Stroke, StrokeDash, Transform,
 };
 
-use crate::{
-  cache::FastMap,
-  geom::{Point, Rect as GeoRect},
-};
+use crate::geom::{Point, Rect as GeoRect};
 
 #[inline(always)]
 fn skia_rect(rect: GeoRect) -> Option<Rect> {
@@ -171,33 +168,21 @@ pub fn rect_fill(pm: &mut Pixmap, rect: GeoRect, rgb: [u8; 3], alpha: u8) {
   );
 }
 
-pub fn dashed_rect(pm: &mut Pixmap, rect: GeoRect, rgb: [u8; 3], width: f32) {
+pub fn dashed_rect(pm: &mut Pixmap, rect: GeoRect, rgb: [u8; 3]) {
   let Some(path) = rect_path(rect) else {
     return;
   };
   static DASH_STROKE: OnceLock<Stroke> = OnceLock::new();
-  let base_stroke = DASH_STROKE.get_or_init(|| {
-    let mut s = stroke(1.0);
-    s.line_cap = LineCap::Butt;
-    s.line_join = LineJoin::Miter;
-    s.dash = StrokeDash::new(vec![3.0, 3.0], 0.0);
-    s
+  let dash = DASH_STROKE.get_or_init(|| Stroke {
+    line_cap: LineCap::Butt,
+    line_join: LineJoin::Miter,
+    dash: StrokeDash::new(vec![3.0, 3.0], 0.0),
+    ..stroke(1.0)
   });
-  let widened;
-  let stroke_ref: &Stroke = if width == 1.0 {
-    base_stroke
-  } else {
-    widened = {
-      let mut s = base_stroke.clone();
-      s.width = width;
-      s
-    };
-    &widened
-  };
   pm.stroke_path(
     &path,
     &paint(rgb[0], rgb[1], rgb[2], 255),
-    stroke_ref,
+    dash,
     Transform::identity(),
     None,
   );
@@ -222,8 +207,8 @@ fn round_rect_path(r: Rect, radius: f32) -> Option<Path> {
 type RoundRectKey = (u32, u32, u32);
 
 thread_local! {
-  static ROUND_RECT_CACHE: RefCell<FastMap<RoundRectKey, Path>> =
-    RefCell::new(FastMap::with_capacity_and_hasher(16, Default::default()));
+  static ROUND_RECT_CACHE: RefCell<HashMap<RoundRectKey, Path>> =
+    RefCell::new(HashMap::with_capacity(16));
 }
 
 fn cached_round_rect_geometry(w: f32, h: f32, radius: f32) -> Option<Path> {
@@ -313,11 +298,11 @@ impl Icon {
   }
 }
 
-type TintCache = FastMap<(usize, [u8; 3], u32), Pixmap>;
+type TintCache = HashMap<(usize, [u8; 3], u32), Pixmap>;
 
 thread_local! {
   static TINT_CACHE: RefCell<TintCache> =
-    RefCell::new(FastMap::with_capacity_and_hasher(64, Default::default()));
+    RefCell::new(HashMap::with_capacity(64));
 }
 
 fn create_tinted_sprite(icon: Icon, color: [u8; 3], box_size: f32) -> Pixmap {
@@ -476,7 +461,7 @@ mod tests {
     let mut b = Pixmap::new(20, 20).expect("alloc");
     let r = GeoRect::new(2.0, 2.0, 10.0, 10.0);
     rect_stroke(&mut a, r, [255, 255, 255], 1.0, 255);
-    dashed_rect(&mut b, r, [255, 255, 255], 1.0);
+    dashed_rect(&mut b, r, [255, 255, 255]);
     assert!(a.data().iter().any(|&p| p != 0));
     assert!(b.data().iter().any(|&p| p != 0));
   }
@@ -502,17 +487,5 @@ mod tests {
     // Same cached geometry, different translation: both should still paint.
     assert!(a.data().iter().any(|&p| p != 0));
     assert!(b.data().iter().any(|&p| p != 0));
-  }
-
-  #[test]
-  fn dashed_rect_at_nondefault_width_still_paints() {
-    let mut pm = Pixmap::new(20, 20).expect("alloc");
-    dashed_rect(
-      &mut pm,
-      GeoRect::new(2.0, 2.0, 10.0, 10.0),
-      [255, 255, 255],
-      2.5,
-    );
-    assert!(pm.data().iter().any(|&p| p != 0));
   }
 }

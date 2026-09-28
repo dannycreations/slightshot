@@ -1,6 +1,5 @@
 mod action;
 mod annotate;
-mod cache;
 mod capture;
 mod draw;
 mod geom;
@@ -35,11 +34,11 @@ fn run() -> Result<()> {
     let _ =
       SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
   }
-  println!("slightshot: press Ctrl+C here to quits.");
+  println!("slightshot: press Ctrl+C here to quit.");
   let event_loop = EventLoop::<hotkey::Trigger>::with_user_event().build()?;
   let proxy = event_loop.create_proxy();
   hotkey::spawn(proxy.clone())?;
-  println!("slightshot: press Numpad 8 will snapshot the screen.");
+  println!("slightshot: press Numpad 8 to snapshot the screen.");
   ctrlc::set_handler(move || {
     let _ = proxy.send_event(hotkey::Trigger::Quit);
   })?;

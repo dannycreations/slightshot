@@ -31,6 +31,9 @@ struct GdiCaptureGuard {
 
 impl Drop for GdiCaptureGuard {
   fn drop(&mut self) {
+    // SAFETY: each handle was created by this thread (GetDC, CreateCompatibleDC,
+    // CreateDIBSection) and is released exactly once; `bmp` is only deleted
+    // after the memory DC is pointed back at `previous`.
     unsafe {
       if !self.bmp.is_invalid() {
         SelectObject(self.mem_dc, self.previous);
@@ -47,6 +50,10 @@ impl Drop for GdiCaptureGuard {
 }
 
 pub fn grab() -> Result<ScreenShot> {
+  // SAFETY: every handle created below is owned by `guard`, whose `Drop` runs
+  // on all exit paths including `?`. The bitmap stays mapped and untouched by
+  // anyone else until then, and its pixels are copied out before this function
+  // returns, which is also when the handles are released.
   unsafe {
     let x = GetSystemMetrics(SM_XVIRTUALSCREEN);
     let y = GetSystemMetrics(SM_YVIRTUALSCREEN);
@@ -121,8 +128,6 @@ pub fn grab() -> Result<ScreenShot> {
 
     let pixmap = Pixmap::from_vec(data, size)
       .context("zero-sized capture or allocation failed")?;
-
-    drop(guard);
 
     Ok(ScreenShot {
       pixmap,

@@ -41,6 +41,15 @@ impl Command {
       Command::Deliver(deliverable) => deliverable.label(),
     }
   }
+
+  /// Whether a button carrying this command accepts a click right now.
+  fn enabled(self, ready: bool, can_undo: bool) -> bool {
+    match self {
+      Command::Tool(_) | Command::NextColor | Command::Close => true,
+      Command::Undo => can_undo,
+      Command::Deliver(_) => ready,
+    }
+  }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -52,35 +61,53 @@ pub struct Button {
   pub active: bool,
 }
 
-type LayoutSignature = (Option<Rect>, Rect, bool);
+const fn button(command: Command, icon: draw::Icon) -> Button {
+  Button {
+    command,
+    icon,
+    area: Rect::ZERO,
+    enabled: false,
+    active: false,
+  }
+}
 
-#[derive(Debug, Default)]
+const TOOL_BUTTONS: [Button; 8] = [
+  button(Command::Tool(Tool::Pen), draw::Icon::Pen),
+  button(Command::Tool(Tool::Line), draw::Icon::Line),
+  button(Command::Tool(Tool::Arrow), draw::Icon::Arrow),
+  button(Command::Tool(Tool::Box), draw::Icon::Outline),
+  button(Command::Tool(Tool::Marker), draw::Icon::Marker),
+  button(Command::Tool(Tool::Label), draw::Icon::Letter),
+  button(Command::NextColor, draw::Icon::Letter),
+  button(Command::Undo, draw::Icon::Undo),
+];
+
+const ACTION_BUTTONS: [Button; 4] = [
+  button(Command::Deliver(Deliverable::Upload), draw::Icon::Upload),
+  button(Command::Deliver(Deliverable::Copy), draw::Icon::CopyImage),
+  button(Command::Deliver(Deliverable::Save), draw::Icon::Save),
+  button(Command::Close, draw::Icon::Close),
+];
+
+#[derive(Debug)]
 pub struct Chrome {
   pub tools: Vec<Button>,
   pub actions: Vec<Button>,
-  layout: Option<LayoutSignature>,
+}
+
+impl Default for Chrome {
+  fn default() -> Self {
+    Self {
+      tools: TOOL_BUTTONS.to_vec(),
+      actions: ACTION_BUTTONS.to_vec(),
+    }
+  }
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Hotspot {
   Tool(usize),
   Action(usize),
-}
-
-#[inline(always)]
-fn button(
-  command: Command,
-  icon: draw::Icon,
-  enabled: bool,
-  active: bool,
-) -> Button {
-  Button {
-    command,
-    icon,
-    area: Rect::default(),
-    enabled,
-    active,
-  }
 }
 
 #[inline(always)]
@@ -97,73 +124,23 @@ pub fn build(
   show_chrome: bool,
 ) {
   let ready = deliverable_region(selection).is_some();
+  let can_undo = history.can_undo();
 
-  // These panels are built once and then mutated in place; `is_empty` (rather
-  // than checking against the literal's length) is the only thing that needs
-  // to stay in sync with the button lists below.
-  if chrome.tools.is_empty() {
-    chrome.tools = vec![
-      button(Command::Tool(Tool::Pen), draw::Icon::Pen, true, false),
-      button(Command::Tool(Tool::Line), draw::Icon::Line, true, false),
-      button(Command::Tool(Tool::Arrow), draw::Icon::Arrow, true, false),
-      button(Command::Tool(Tool::Box), draw::Icon::Outline, true, false),
-      button(Command::Tool(Tool::Marker), draw::Icon::Marker, true, false),
-      button(Command::Tool(Tool::Label), draw::Icon::Letter, true, false),
-      button(Command::NextColor, draw::Icon::Letter, true, false),
-      button(Command::Undo, draw::Icon::Undo, false, false),
-    ];
-  }
-  if chrome.actions.is_empty() {
-    chrome.actions = vec![
-      button(
-        Command::Deliver(Deliverable::Upload),
-        draw::Icon::Upload,
-        false,
-        false,
-      ),
-      button(
-        Command::Deliver(Deliverable::Copy),
-        draw::Icon::CopyImage,
-        false,
-        false,
-      ),
-      button(
-        Command::Deliver(Deliverable::Save),
-        draw::Icon::Save,
-        false,
-        false,
-      ),
-      button(Command::Close, draw::Icon::Close, true, false),
-    ];
-  }
-
-  for b in &mut chrome.tools[..6] {
-    if let Command::Tool(t) = b.command {
-      b.active = t == tool;
+  for b in chrome.tools.iter_mut().chain(&mut chrome.actions) {
+    b.enabled = b.command.enabled(ready, can_undo);
+    if let Command::Tool(active) = b.command {
+      b.active = active == tool;
     }
   }
-  chrome.tools[7].enabled = history.can_undo();
 
-  for b in &mut chrome.actions[..3] {
-    b.enabled = ready;
-  }
-
-  let visible = show_chrome && selection.is_some();
-  let signature: LayoutSignature = (selection, bounds, visible);
-  if chrome.layout != Some(signature) {
-    chrome.layout = Some(signature);
-    if visible {
-      layout_panel(&mut chrome.tools, selection, bounds, Axis::Vertical);
-      layout_panel(&mut chrome.actions, selection, bounds, Axis::Horizontal);
-    } else {
-      for b in &mut chrome.tools {
-        b.area = Rect::default();
-      }
-      for b in &mut chrome.actions {
-        b.area = Rect::default();
-      }
+  let Some(sel) = selection.filter(|_| show_chrome) else {
+    for b in chrome.tools.iter_mut().chain(&mut chrome.actions) {
+      b.area = Rect::ZERO;
     }
-  }
+    return;
+  };
+  layout_panel(&mut chrome.tools, sel, bounds, Axis::Vertical);
+  layout_panel(&mut chrome.actions, sel, bounds, Axis::Horizontal);
 }
 
 pub fn hotspot_at(chrome: &Chrome, p: Point) -> Option<Hotspot> {
@@ -187,16 +164,9 @@ enum Axis {
   Horizontal,
 }
 
-fn layout_panel(
-  buttons: &mut [Button],
-  selection: Option<Rect>,
-  bounds: Rect,
-  axis: Axis,
-) {
-  let Some(sel) = selection else {
-    return;
-  };
+fn layout_panel(buttons: &mut [Button], sel: Rect, bounds: Rect, axis: Axis) {
   let count = buttons.len() as f32;
+  let step = BUTTON + TOOL_GAP;
   let main = count * BUTTON + (count - 1.0) * TOOL_GAP + PANEL_PAD * 2.0;
   let cross = BUTTON + PANEL_PAD * 2.0;
   let (width, height) = match axis {
@@ -229,20 +199,12 @@ fn layout_panel(
   };
 
   for (index, button) in buttons.iter_mut().enumerate() {
-    button.area = match axis {
-      Axis::Vertical => Rect::new(
-        x + PANEL_PAD,
-        y + PANEL_PAD + index as f32 * (BUTTON + TOOL_GAP),
-        BUTTON,
-        BUTTON,
-      ),
-      Axis::Horizontal => Rect::new(
-        x + PANEL_PAD + index as f32 * (BUTTON + TOOL_GAP),
-        y + PANEL_PAD,
-        BUTTON,
-        BUTTON,
-      ),
+    let (dx, dy) = match axis {
+      Axis::Vertical => (0.0, index as f32 * step),
+      Axis::Horizontal => (index as f32 * step, 0.0),
     };
+    button.area =
+      Rect::new(x + PANEL_PAD + dx, y + PANEL_PAD + dy, BUTTON, BUTTON);
   }
 }
 
@@ -262,44 +224,43 @@ pub struct Scene<'a> {
 
 pub fn paint(pm: &mut Pixmap, scene: &Scene) {
   pm.data_mut().copy_from_slice(scene.inked_backdrop.data());
-  if let Some(sel) = scene.selection {
-    let (x0, y0, width, height) =
-      region_pixels(sel, pm.width() as i32, pm.height() as i32);
-    if width <= 0 || height <= 0 {
-      return;
-    }
-    let px_w = pm.width() as usize;
-    blit(
-      pm.data_mut(),
-      px_w,
-      x0 as usize,
-      y0 as usize,
-      scene.inked_canvas.data(),
-      px_w,
-      x0 as usize,
-      y0 as usize,
-      width as usize,
-      height as usize,
+  let Some(sel) = scene.selection else {
+    draw_live(pm, scene);
+    return;
+  };
+  let (x0, y0, width, height) = region_pixels(sel, pm.width(), pm.height());
+  if width == 0 || height == 0 {
+    return;
+  }
+  let px_w = pm.width() as usize;
+  blit(
+    pm.data_mut(),
+    px_w,
+    x0 as usize,
+    y0 as usize,
+    scene.inked_canvas.data(),
+    scene.inked_canvas.width() as usize,
+    x0 as usize,
+    y0 as usize,
+    width as usize,
+    height as usize,
+  );
+  draw_live(pm, scene);
+  draw::dashed_rect(pm, sel, [255, 255, 255]);
+  draw_handles(pm, sel);
+  draw_badge(pm, sel, scene.bounds, scene.text);
+  if let Some((at, buffer, size)) = scene.typing {
+    let caret_x = at.x + scene.text.width(buffer, size);
+    draw::polyline(
+      pm,
+      &[Point::new(caret_x, at.y), Point::new(caret_x, at.y + size)],
+      [255, 255, 255],
+      1.5,
+      255,
+      Point::new(0.0, 0.0),
     );
   }
-  draw_live(pm, scene);
-  if let Some(sel) = scene.selection {
-    draw_border(pm, sel);
-    draw_handles(pm, sel);
-    draw_badge(pm, sel, scene.bounds, scene.text);
-    if let Some((at, buffer, size)) = scene.typing {
-      let caret_x = at.x + scene.text.width(buffer, size);
-      draw::polyline(
-        pm,
-        &[Point::new(caret_x, at.y), Point::new(caret_x, at.y + size)],
-        [255, 255, 255],
-        1.5,
-        255,
-        Point::new(0.0, 0.0),
-      );
-    }
-    draw_panels(pm, scene);
-  }
+  draw_panels(pm, scene);
 }
 
 const DIM_LUT: [u8; 256] = {
@@ -331,6 +292,8 @@ pub fn dimmed_copy(frame: &Pixmap) -> Pixmap {
   out
 }
 
+/// Copies a `width` by `height` pixel block. Both callers reject an empty
+/// region before calling, so the block always covers at least one pixel.
 #[allow(clippy::too_many_arguments)]
 fn blit(
   dest: &mut [u8],
@@ -344,9 +307,6 @@ fn blit(
   width: usize,
   height: usize,
 ) {
-  if width == 0 || height == 0 {
-    return;
-  }
   let row_bytes = width * 4;
   let src_stride_bytes = source_stride_px * 4;
   let dst_stride_bytes = dest_stride_px * 4;
@@ -384,31 +344,28 @@ fn draw_live(pm: &mut Pixmap, scene: &Scene) {
   }
 }
 
+/// The pixel rectangle covering `sel`, clipped to a `px_w` by `px_h` image.
+/// Every edge is clipped, because a drag can start or end outside the image. A
+/// selection that falls outside reports a zero width or height. `f32 as u32`
+/// saturates, so negative and NaN edges land on zero.
 #[inline(always)]
-fn region_pixels(sel: Rect, px_w: i32, px_h: i32) -> (i32, i32, i32, i32) {
-  let x0 = sel.x.floor().max(0.0) as i32;
-  let y0 = sel.y.floor().max(0.0) as i32;
-  let width = ((sel.right().ceil() as i32) - x0).clamp(1, px_w - x0);
-  let height = ((sel.bottom().ceil() as i32) - y0).clamp(1, px_h - y0);
+fn region_pixels(sel: Rect, px_w: u32, px_h: u32) -> (u32, u32, u32, u32) {
+  let x0 = (sel.x.floor() as u32).min(px_w);
+  let y0 = (sel.y.floor() as u32).min(px_h);
+  let width = ((sel.right().ceil() as u32).saturating_sub(x0)).min(px_w - x0);
+  let height = ((sel.bottom().ceil() as u32).saturating_sub(y0)).min(px_h - y0);
   (x0, y0, width, height)
 }
 
-pub fn flatten(
-  frame: &Pixmap,
-  sel: Rect,
-  shapes: &[Shape],
-  text: &TextEngine,
-) -> Shot {
-  let px_w = frame.width() as i32;
-  let px_h = frame.height() as i32;
-  if px_w == 0 || px_h == 0 {
+/// Crops `sel` out of `frame`. Annotations are expected to be already inked
+/// into `frame`, which is what the overlay does before delivering a shot.
+pub fn flatten(frame: &Pixmap, sel: Rect) -> Shot {
+  let (x0, y0, width, height) =
+    region_pixels(sel, frame.width(), frame.height());
+  if width == 0 || height == 0 {
     return Shot::empty();
   }
-  let (x0, y0, width, height) = region_pixels(sel, px_w, px_h);
-  if width <= 0 || height <= 0 {
-    return Shot::empty();
-  }
-  let Some(mut layer) = Pixmap::new(width as u32, height as u32) else {
+  let Some(mut layer) = Pixmap::new(width, height) else {
     return Shot::empty();
   };
   blit(
@@ -417,21 +374,15 @@ pub fn flatten(
     0,
     0,
     frame.data(),
-    px_w as usize,
+    frame.width() as usize,
     x0 as usize,
     y0 as usize,
     width as usize,
     height as usize,
   );
-  if !shapes.is_empty() {
-    let origin = Point::new(x0 as f32, y0 as f32);
-    for shape in shapes {
-      ink(&mut layer, shape, origin, text);
-    }
-  }
   Shot {
-    width: width as u32,
-    height: height as u32,
+    width,
+    height,
     rgba: layer.take(),
   }
 }
@@ -504,10 +455,6 @@ pub(crate) fn ink(
       engine.draw(pm, text, at.x - origin.x, at.y - origin.y, *size, *color);
     }
   }
-}
-
-fn draw_border(pm: &mut Pixmap, sel: Rect) {
-  draw::dashed_rect(pm, sel, [255, 255, 255], 1.0);
 }
 
 fn draw_handles(pm: &mut Pixmap, sel: Rect) {
@@ -703,14 +650,12 @@ mod tests {
   #[test]
   fn hotspot_at_finds_button_under_point() {
     let mut chrome = Chrome::default();
-    let mut b = button(Command::Undo, draw::Icon::Undo, true, false);
-    b.area = Rect::new(10.0, 10.0, 30.0, 30.0);
-    chrome.actions.push(b);
+    chrome.actions[0].area = Rect::new(10.0, 10.0, 30.0, 30.0);
     assert_eq!(
       hotspot_at(&chrome, Point::new(20.0, 20.0)),
       Some(Hotspot::Action(0))
     );
-    assert_eq!(hotspot_at(&chrome, Point::new(0.0, 0.0)), None);
+    assert_eq!(hotspot_at(&chrome, Point::new(100.0, 100.0)), None);
   }
 
   #[test]
@@ -737,11 +682,22 @@ mod tests {
 
   #[test]
   fn build_hides_buttons_without_selection() {
+    let sel = Rect::new(10.0, 10.0, 200.0, 150.0);
+    let bounds = Rect::new(0.0, 0.0, 1920.0, 1080.0);
     let mut chrome = Chrome::default();
     build(
       &mut chrome,
+      Some(sel),
+      bounds,
+      Tool::Pen,
+      &History::default(),
+      true,
+    );
+    assert!(chrome.tools.iter().all(|b| b.area.w > 0.0));
+    build(
+      &mut chrome,
       None,
-      Rect::new(0.0, 0.0, 1920.0, 1080.0),
+      bounds,
       Tool::Pen,
       &History::default(),
       true,
@@ -771,22 +727,6 @@ mod tests {
   #[test]
   fn build_hides_buttons_when_not_idle() {
     let sel = Rect::new(10.0, 10.0, 200.0, 150.0);
-    let mut chrome = Chrome::default();
-    build(
-      &mut chrome,
-      Some(sel),
-      Rect::new(0.0, 0.0, 1920.0, 1080.0),
-      Tool::Pen,
-      &History::default(),
-      false,
-    );
-    assert!(chrome.tools.iter().all(|b| b.area.w == 0.0));
-    assert!(chrome.actions.iter().all(|b| b.area.w == 0.0));
-  }
-
-  #[test]
-  fn build_is_idempotent_for_an_unchanged_signature() {
-    let sel = Rect::new(10.0, 10.0, 200.0, 150.0);
     let bounds = Rect::new(0.0, 0.0, 1920.0, 1080.0);
     let mut chrome = Chrome::default();
     build(
@@ -797,16 +737,66 @@ mod tests {
       &History::default(),
       true,
     );
-    let before = chrome.tools[0].area;
     build(
       &mut chrome,
       Some(sel),
       bounds,
       Tool::Pen,
       &History::default(),
+      false,
+    );
+    assert!(chrome.tools.iter().all(|b| b.area.w == 0.0));
+    assert!(chrome.actions.iter().all(|b| b.area.w == 0.0));
+  }
+
+  #[test]
+  fn build_derives_button_state_from_the_session() {
+    let bounds = Rect::new(0.0, 0.0, 1920.0, 1080.0);
+    let ready = Rect::new(10.0, 10.0, 200.0, 150.0);
+    let mut history = History::default();
+    let mut chrome = Chrome::default();
+    build(
+      &mut chrome,
+      Some(ready),
+      bounds,
+      Tool::Arrow,
+      &history,
       true,
     );
-    assert_eq!(chrome.tools[0].area, before);
+
+    fn find(chrome: &Chrome, command: Command) -> &Button {
+      chrome
+        .tools
+        .iter()
+        .chain(&chrome.actions)
+        .find(|b| b.command == command)
+        .expect("the chrome lists every command")
+    }
+    assert!(find(&chrome, Command::Tool(Tool::Arrow)).active);
+    assert!(!find(&chrome, Command::Tool(Tool::Pen)).active);
+    assert!(!find(&chrome, Command::Undo).enabled);
+    assert!(find(&chrome, Command::Deliver(Deliverable::Copy)).enabled);
+
+    history.push(Shape::Caption {
+      at: Point::new(5.0, 5.0),
+      text: "x".to_string(),
+      color: [0, 0, 0],
+      size: 10.0,
+    });
+    build(
+      &mut chrome,
+      Some(ready),
+      bounds,
+      Tool::Arrow,
+      &history,
+      true,
+    );
+    assert!(find(&chrome, Command::Undo).enabled);
+
+    let tiny = Rect::new(10.0, 10.0, 1.0, 1.0);
+    build(&mut chrome, Some(tiny), bounds, Tool::Arrow, &history, true);
+    assert!(!find(&chrome, Command::Deliver(Deliverable::Copy)).enabled);
+    assert!(find(&chrome, Command::Close).enabled);
   }
 
   #[test]
@@ -826,26 +816,43 @@ mod tests {
   }
 
   #[test]
-  fn flatten_crops_region_and_keeps_rgba_stride() {
-    let Ok(engine) = TextEngine::load() else {
-      return;
-    };
-    let mut frame = Pixmap::new(100, 100).unwrap();
-    frame.data_mut().iter_mut().for_each(|p| *p = 255);
-    let sel = Rect::new(10.0, 10.0, 20.0, 30.0);
-    let shot = flatten(&frame, sel, &[], &engine);
-    assert_eq!((shot.width, shot.height), (20, 30));
-    assert_eq!(shot.rgba.len(), 20 * 30 * 4);
+  fn region_pixels_drains_a_selection_past_the_source() {
+    // A drag can leave the window, so the rubber band can start past the
+    // right and bottom edges. That must report an empty region, not panic.
+    let sel = Rect::new(45.0, 38.0, 40.0, 20.0);
+    let (x0, y0, w, h) = region_pixels(sel, 50, 40);
+    assert_eq!((x0, y0, w, h), (45, 38, 5, 2));
+    let beyond = Rect::new(80.0, 90.0, 10.0, 10.0);
+    let (x0, y0, w, h) = region_pixels(beyond, 50, 40);
+    assert_eq!((x0, y0, w, h), (50, 40, 0, 0));
   }
 
   #[test]
-  fn flatten_draws_committed_shapes_into_the_region() {
+  fn flatten_crops_the_exact_pixels_of_the_region() {
+    let mut frame = Pixmap::new(4, 4).unwrap();
+    for (row, px) in frame
+      .data_mut()
+      .as_chunks_mut::<4>()
+      .0
+      .iter_mut()
+      .enumerate()
+    {
+      px.copy_from_slice(&[row as u8, 0, 0, 255]);
+    }
+    let shot = flatten(&frame, Rect::new(1.0, 1.0, 2.0, 2.0));
+    assert_eq!((shot.width, shot.height), (2, 2));
+    let rows: Vec<u8> =
+      shot.rgba.as_chunks::<4>().0.iter().map(|p| p[0]).collect();
+    assert_eq!(rows, vec![5, 6, 9, 10]);
+  }
+
+  #[test]
+  fn flatten_carries_ink_already_committed_to_the_canvas() {
     let Ok(engine) = TextEngine::load() else {
       return;
     };
-    let mut frame = Pixmap::new(100, 100).unwrap();
-    frame.data_mut().iter_mut().for_each(|p| *p = 100);
-    let sel = Rect::new(10.0, 10.0, 20.0, 30.0);
+    let mut canvas = Pixmap::new(100, 100).unwrap();
+    canvas.data_mut().iter_mut().for_each(|p| *p = 100);
     let stroke = Shape::Line {
       from: Point::new(15.0, 15.0),
       to: Point::new(25.0, 35.0),
@@ -853,7 +860,9 @@ mod tests {
       width: 2.5,
       arrow: false,
     };
-    let shot = flatten(&frame, sel, &[stroke], &engine);
+    ink(&mut canvas, &stroke, Point::default(), &engine);
+
+    let shot = flatten(&canvas, Rect::new(10.0, 10.0, 20.0, 30.0));
     let painted = shot
       .rgba
       .as_chunks::<4>()
@@ -868,8 +877,7 @@ mod tests {
     let Ok(engine) = TextEngine::load() else {
       return;
     };
-    let frame = Pixmap::new(100, 100).unwrap();
-    let sel = Rect::new(0.0, 0.0, 100.0, 100.0);
+    let mut canvas = Pixmap::new(100, 100).unwrap();
     let arrow = Shape::Line {
       from: Point::new(10.0, 50.0),
       to: Point::new(90.0, 50.0),
@@ -877,18 +885,18 @@ mod tests {
       width: 4.0,
       arrow: true,
     };
-    let shot = flatten(&frame, sel, &[arrow], &engine);
-    let width = shot.width as usize;
+    ink(&mut canvas, &arrow, Point::default(), &engine);
 
     let painted_in_column = |x: usize| -> usize {
-      let mut count = 0;
-      for y in 0..shot.height as usize {
-        let p = &shot.rgba[(y * width + x) * 4..];
-        if p[0] == 255 && p[3] == 255 {
-          count += 1;
-        }
-      }
-      count
+      canvas
+        .data()
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .skip(x)
+        .step_by(100)
+        .filter(|p| p[0] == 255 && p[3] == 255)
+        .count()
     };
 
     let tip = painted_in_column(90);
