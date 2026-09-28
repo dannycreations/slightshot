@@ -1,5 +1,6 @@
 use std::{
   ffi::c_void,
+  mem,
   num::NonZeroU32,
   sync::Arc,
   thread,
@@ -99,6 +100,11 @@ impl Ink {
         .expect("backdrop allocation failed"),
     }
   }
+
+  fn stamp(&mut self, engine: &TextEngine, shape: &Shape) {
+    render::ink(&mut self.canvas, shape, engine);
+    render::dimmed_into(&mut self.backdrop, &self.canvas);
+  }
 }
 
 struct Session {
@@ -187,23 +193,8 @@ impl ApplicationHandler<Trigger> for App {
           }
           Key::Named(NamedKey::Backspace) => session.backspace(),
           Key::Character(ch) => {
-            if ch.as_str().eq_ignore_ascii_case("c")
-              && session.modifiers.control_key()
-            {
-              if let Some(outcome) = session.deliver(Deliverable::Copy) {
-                self.finish(outcome);
-              }
-            } else if (ch.as_str() == "[" || ch.as_str() == "]")
-              && !session.is_typing()
-            {
-              let delta = if ch.as_str() == "]" {
-                SIZE_STEP
-              } else {
-                -SIZE_STEP
-              };
-              session.adjust_size(delta);
-            } else {
-              session.type_char(ch.as_str());
+            if let Some(outcome) = session.character(ch.as_str()) {
+              self.finish(outcome);
             }
           }
           _ => {}
@@ -272,25 +263,7 @@ impl Session {
         .create_window(attributes)
         .context("creating the overlay window failed")?,
     );
-    if let Ok(handle) = window.window_handle() {
-      if let RawWindowHandle::Win32(w) = handle.as_raw() {
-        let hwnd = HWND(w.hwnd.get() as *mut c_void);
-        // SAFETY: `hwnd` comes from the window this function just created and
-        // outlives both calls. Setting a null class background brush stops the
-        // window from painting over the frame we blit ourselves, and the DWM
-        // attribute is a plain value write to our own window.
-        unsafe {
-          SetClassLongPtrW(hwnd, GCLP_HBRBACKGROUND, 0);
-          let disable: BOOL = TRUE;
-          let _ = DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_TRANSITIONS_FORCEDISABLED,
-            &disable as *const BOOL as *const c_void,
-            std::mem::size_of::<BOOL>() as u32,
-          );
-        }
-      }
-    }
+    quiet_window(&window);
     let context = SoftContext::new(window.clone()).map_err(|error| {
       anyhow!("no graphics context for the overlay: {error}")
     })?;
@@ -568,11 +541,7 @@ impl Session {
       ..
     } = self;
     let ink = ink.get_or_insert_with(|| Ink::fresh(canvas));
-    render::ink(&mut ink.canvas, shape, Point::default(), engine);
-    // The backdrop is just a dimmed view of the canvas, so refresh it with a
-    // cheap lookup-table pass instead of re-running the (much pricier)
-    // anti-aliased stroke rasterizer a second time for the same shape.
-    render::dimmed_into(&mut ink.backdrop, &ink.canvas);
+    ink.stamp(engine, shape);
   }
 
   fn rebuild_ink(&mut self) {
@@ -592,17 +561,15 @@ impl Session {
     let ink = ink.get_or_insert_with(|| Ink::fresh(canvas));
     ink.canvas.data_mut().copy_from_slice(canvas.data());
     for shape in history.shapes() {
-      render::ink(&mut ink.canvas, shape, Point::default(), engine);
+      render::ink(&mut ink.canvas, shape, engine);
     }
-    // One dimmed pass over the fully replayed canvas beats re-stroking every
-    // surviving shape a second time just for the backdrop.
     render::dimmed_into(&mut ink.backdrop, &ink.canvas);
   }
 
   fn mouse_up(&mut self) {
     // `Type` hands its buffer and anchor straight back: clicking while typing
     // must keep the text, so that one mode survives the release.
-    match std::mem::replace(&mut self.mode, Mode::Idle) {
+    match mem::replace(&mut self.mode, Mode::Idle) {
       Mode::Rubber(_) => {
         self.selection = render::deliverable_region(self.selection);
       }
@@ -616,6 +583,19 @@ impl Session {
       _ => {}
     }
     self.window.request_redraw();
+  }
+
+  fn character(&mut self, ch: &str) -> Option<Outcome> {
+    if ch.eq_ignore_ascii_case("c") && self.modifiers.control_key() {
+      return self.deliver(Deliverable::Copy);
+    }
+    if !self.is_typing() && matches!(ch, "[" | "]") {
+      let step = if ch == "]" { SIZE_STEP } else { -SIZE_STEP };
+      self.adjust_size(step);
+      return None;
+    }
+    self.type_char(ch);
+    None
   }
 
   fn type_char(&mut self, ch: &str) {
@@ -636,7 +616,7 @@ impl Session {
     if let Mode::Type(buffer, anchor) = &mut self.mode {
       let text = Shape::Caption {
         at: *anchor,
-        text: std::mem::take(buffer),
+        text: mem::take(buffer),
         color: active_color(self.palette_index),
         size: self.size(Tool::Label),
       };
@@ -672,6 +652,29 @@ impl Session {
     self.hint = Some(format_size(next));
     self.hint_until = Some(Instant::now() + HINT_DURATION);
     self.window.request_redraw();
+  }
+}
+
+fn quiet_window(window: &Window) {
+  let Ok(handle) = window.window_handle() else {
+    return;
+  };
+  let RawWindowHandle::Win32(win32) = handle.as_raw() else {
+    return;
+  };
+  let hwnd = HWND(win32.hwnd.get() as *mut c_void);
+  // SAFETY: `hwnd` is the handle of the window just created, which outlives
+  // this call. Both writes target only that window: the class brush is set to
+  // null, and the DWM attribute is a plain value write.
+  unsafe {
+    SetClassLongPtrW(hwnd, GCLP_HBRBACKGROUND, 0);
+    let disable: BOOL = TRUE;
+    let _ = DwmSetWindowAttribute(
+      hwnd,
+      DWMWA_TRANSITIONS_FORCEDISABLED,
+      &disable as *const BOOL as *const c_void,
+      mem::size_of::<BOOL>() as u32,
+    );
   }
 }
 
@@ -727,6 +730,8 @@ fn resize_cursor(handle: Handle) -> CursorIcon {
 
 #[cfg(test)]
 mod tests {
+  use Handle::*;
+
   use super::*;
   use crate::geom::{handle_anchor, HANDLES};
 
@@ -767,7 +772,6 @@ mod tests {
 
   #[test]
   fn resize_cursor_maps_each_handle_to_its_icon() {
-    use Handle::*;
     let cases = [
       (TopLeft, CursorIcon::NwseResize),
       (BottomRight, CursorIcon::NwseResize),

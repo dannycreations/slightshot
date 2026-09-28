@@ -58,11 +58,6 @@ impl Rect {
   }
 
   #[inline(always)]
-  pub fn translated(self, dx: f32, dy: f32) -> Rect {
-    Self::new(self.x + dx, self.y + dy, self.w, self.h)
-  }
-
-  #[inline(always)]
   pub fn inflated(self, margin: f32) -> Rect {
     Self::new(
       self.x - margin,

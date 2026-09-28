@@ -24,6 +24,8 @@ pub const MIN_SIZE: f32 = 1.0;
 pub const MAX_SIZE: f32 = 100.0;
 pub const SIZE_STEP: f32 = 1.0;
 
+const MIN_DRAG: f32 = 3.0;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 #[repr(usize)]
 pub enum Tool {
@@ -116,8 +118,10 @@ impl Shape {
   pub fn is_complete(&self) -> bool {
     match self {
       Shape::Stroke { points, .. } => points.len() >= 2,
-      Shape::Line { from, to, .. } => from.distance_squared(*to) >= 9.0,
-      Shape::Outline { rect, .. } => rect.w >= 3.0 && rect.h >= 3.0,
+      Shape::Line { from, to, .. } => {
+        from.distance_squared(*to) >= MIN_DRAG * MIN_DRAG
+      }
+      Shape::Outline { rect, .. } => rect.w >= MIN_DRAG && rect.h >= MIN_DRAG,
       Shape::Caption { text, .. } => !text.trim().is_empty(),
     }
   }

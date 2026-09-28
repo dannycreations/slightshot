@@ -258,7 +258,6 @@ pub fn paint(pm: &mut Pixmap, scene: &Scene) {
       [255, 255, 255],
       1.5,
       255,
-      Point::new(0.0, 0.0),
     );
   }
   draw_panels(pm, scene);
@@ -329,9 +328,8 @@ fn copy_region(
 }
 
 fn draw_live(pm: &mut Pixmap, scene: &Scene) {
-  let origin = Point::new(0.0, 0.0);
   if let Some(draft) = scene.draft {
-    ink(pm, draft, origin, scene.text);
+    ink(pm, draft, scene.text);
   }
   if let Some((at, buffer, size)) = scene.typing {
     let color = active_color(scene.palette_index);
@@ -371,12 +369,7 @@ pub fn flatten(frame: &Pixmap, sel: Rect) -> Shot {
   }
 }
 
-pub(crate) fn ink(
-  pm: &mut Pixmap,
-  shape: &Shape,
-  origin: Point,
-  engine: &TextEngine,
-) {
+pub(crate) fn ink(pm: &mut Pixmap, shape: &Shape, engine: &TextEngine) {
   match shape {
     Shape::Stroke {
       points,
@@ -385,7 +378,7 @@ pub(crate) fn ink(
       marker,
     } => {
       let alpha = if *marker { MARKER_ALPHA } else { 255 };
-      draw::polyline(pm, points, *color, *width, alpha, origin);
+      draw::polyline(pm, points, *color, *width, alpha);
     }
     Shape::Line {
       from,
@@ -394,41 +387,18 @@ pub(crate) fn ink(
       width,
       arrow,
     } => {
-      let start = Point::new(from.x - origin.x, from.y - origin.y);
-      let end = Point::new(to.x - origin.x, to.y - origin.y);
+      // An arrow stops its shaft where the head begins, so the two meet
+      // without the head overlapping the line. A plain line runs the full
+      // distance, which is that same shaft with nothing pulled back.
+      let size = if *arrow { (*width * 3.5).max(6.0) } else { 0.0 };
+      let shaft_end = arrow_base(*from, *to, size);
+      draw::polyline(pm, &[*from, shaft_end], *color, *width, 255);
       if *arrow {
-        let size = (*width * 3.5).max(6.0);
-        let (dx, dy) = (end.x - start.x, end.y - start.y);
-        let len = dx.hypot(dy);
-        let base = if len > 0.0 {
-          let k = size.min(len) / len;
-          Point::new(end.x - dx * k, end.y - dy * k)
-        } else {
-          end
-        };
-        draw::polyline(
-          pm,
-          &[start, base],
-          *color,
-          *width,
-          255,
-          Point::new(0.0, 0.0),
-        );
-        draw::arrow_head(pm, start, end, size, *color, 255);
-      } else {
-        draw::polyline(
-          pm,
-          &[start, end],
-          *color,
-          *width,
-          255,
-          Point::new(0.0, 0.0),
-        );
+        draw::arrow_head(pm, *from, *to, size, *color, 255);
       }
     }
     Shape::Outline { rect, color, width } => {
-      let shifted = rect.translated(-origin.x, -origin.y);
-      draw::rect_stroke(pm, shifted, *color, *width, 255);
+      draw::rect_stroke(pm, *rect, *color, *width, 255);
     }
     Shape::Caption {
       at,
@@ -436,9 +406,19 @@ pub(crate) fn ink(
       color,
       size,
     } => {
-      engine.draw(pm, text, at.x - origin.x, at.y - origin.y, *size, *color);
+      engine.draw(pm, text, at.x, at.y, *size, *color);
     }
   }
+}
+
+fn arrow_base(from: Point, to: Point, head_size: f32) -> Point {
+  let (dx, dy) = (to.x - from.x, to.y - from.y);
+  let len = dx.hypot(dy);
+  if len <= 0.0 {
+    return to;
+  }
+  let back = head_size.min(len) / len;
+  Point::new(to.x - dx * back, to.y - dy * back)
 }
 
 fn draw_handles(pm: &mut Pixmap, sel: Rect) {
@@ -859,7 +839,7 @@ mod tests {
       width: 2.5,
       arrow: false,
     };
-    ink(&mut canvas, &stroke, Point::default(), &engine);
+    ink(&mut canvas, &stroke, &engine);
 
     let shot = flatten(&canvas, Rect::new(10.0, 10.0, 20.0, 30.0));
     let painted = shot
@@ -884,7 +864,7 @@ mod tests {
       width: 4.0,
       arrow: true,
     };
-    ink(&mut canvas, &arrow, Point::default(), &engine);
+    ink(&mut canvas, &arrow, &engine);
 
     let painted_in_column = |x: usize| -> usize {
       canvas

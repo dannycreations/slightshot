@@ -45,21 +45,15 @@ pub fn polyline(
   rgb: [u8; 3],
   width: f32,
   alpha: u8,
-  offset: Point,
 ) {
   let Some(path) = smooth_path(pts) else {
     return;
-  };
-  let transform = if offset.x == 0.0 && offset.y == 0.0 {
-    Transform::identity()
-  } else {
-    Transform::from_translate(-offset.x, -offset.y)
   };
   pm.stroke_path(
     &path,
     &paint(rgb[0], rgb[1], rgb[2], alpha),
     &stroke(width),
-    transform,
+    Transform::identity(),
     None,
   );
 }
@@ -273,7 +267,7 @@ impl Icon {
   ) {
     let x = (center.x - box_size * 0.5).round() as i32;
     let y = (center.y - box_size * 0.5).round() as i32;
-    render_tinted_sprite(self, color, box_size, pm, x, y);
+    render_tinted_sprite(self, pm, color, box_size, x, y);
   }
 }
 
@@ -311,9 +305,9 @@ fn create_tinted_sprite(icon: Icon, color: [u8; 3], box_size: f32) -> Pixmap {
 
 fn render_tinted_sprite(
   icon: Icon,
+  pm: &mut Pixmap,
   color: [u8; 3],
   box_size: f32,
-  pm: &mut Pixmap,
   x: i32,
   y: i32,
 ) {
@@ -338,7 +332,10 @@ fn render_tinted_sprite(
 static SPRITE_CACHE: [OnceLock<Pixmap>; 11] = [const { OnceLock::new() }; 11];
 
 fn sprite(icon: Icon) -> &'static Pixmap {
-  SPRITE_CACHE[icon as usize].get_or_init(|| load_sprite(sprite_bytes(icon)))
+  SPRITE_CACHE[icon as usize].get_or_init(|| {
+    Pixmap::decode_png(sprite_bytes(icon))
+      .expect("decoding the embedded icon PNG failed")
+  })
 }
 
 fn sprite_bytes(icon: Icon) -> &'static [u8] {
@@ -357,10 +354,6 @@ fn sprite_bytes(icon: Icon) -> &'static [u8] {
   }
 }
 
-fn load_sprite(bytes: &'static [u8]) -> Pixmap {
-  Pixmap::decode_png(bytes).expect("decoding the embedded icon PNG failed")
-}
-
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -374,7 +367,6 @@ mod tests {
       [255, 0, 0],
       2.0,
       255,
-      Point::new(0.0, 0.0),
     );
     let painted = pm
       .data()
