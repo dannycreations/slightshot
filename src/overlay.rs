@@ -86,12 +86,26 @@ impl Mode {
 
 type Surface = SoftSurface<Arc<Window>, Arc<Window>>;
 
+struct Ink {
+  canvas: Pixmap,
+  backdrop: Pixmap,
+}
+
+impl Ink {
+  fn fresh(canvas: &Pixmap) -> Self {
+    Self {
+      canvas: canvas.clone(),
+      backdrop: Pixmap::new(canvas.width(), canvas.height())
+        .expect("backdrop allocation failed"),
+    }
+  }
+}
+
 struct Session {
   window: Arc<Window>,
   canvas: Pixmap,
   backdrop: Pixmap,
-  inked_backdrop: Option<Pixmap>,
-  inked_canvas: Option<Pixmap>,
+  ink: Option<Ink>,
   frame: Pixmap,
   surface: Surface,
   bounds: Rect,
@@ -296,8 +310,7 @@ impl Session {
       window,
       canvas,
       backdrop,
-      inked_backdrop: None,
-      inked_canvas: None,
+      ink: None,
       frame,
       surface,
       bounds,
@@ -341,21 +354,6 @@ impl Session {
     }
   }
 
-  fn ensure_ink_buffers(&mut self) {
-    if self.inked_backdrop.is_none() {
-      // Content doesn't matter here: both callers overwrite every pixel via
-      // `dimmed_into` right after inking the canvas, so there is no reason
-      // to clone the plain backdrop just to discard it.
-      self.inked_backdrop = Some(
-        Pixmap::new(self.backdrop.width(), self.backdrop.height())
-          .expect("backdrop allocation failed"),
-      );
-    }
-    if self.inked_canvas.is_none() {
-      self.inked_canvas = Some(self.canvas.clone());
-    }
-  }
-
   fn render(&mut self) {
     self.expire_hint();
     render::build(
@@ -367,8 +365,10 @@ impl Session {
       self.mode.shows_chrome(),
     );
     let chrome = &self.chrome;
-    let inked_backdrop = self.inked_backdrop.as_ref().unwrap_or(&self.backdrop);
-    let inked_canvas = self.inked_canvas.as_ref().unwrap_or(&self.canvas);
+    let (inked_backdrop, inked_canvas) = match &self.ink {
+      Some(ink) => (&ink.backdrop, &ink.canvas),
+      None => (&self.backdrop, &self.canvas),
+    };
     let draft = self.mode.draft();
     let typing = self.mode.typing(self.size(Tool::Label));
     let text = &self.engine;
@@ -553,7 +553,7 @@ impl Session {
 
   fn deliver(&self, deliverable: Deliverable) -> Option<Outcome> {
     let sel = render::deliverable_region(self.selection)?;
-    let source = self.inked_canvas.as_ref().unwrap_or(&self.canvas);
+    let source = self.ink.as_ref().map_or(&self.canvas, |ink| &ink.canvas);
     Some(Outcome::Deliver {
       deliverable,
       shot: render::flatten(source, sel),
@@ -561,35 +561,47 @@ impl Session {
   }
 
   fn ink_shape(&mut self, shape: &Shape) {
-    self.ensure_ink_buffers();
-    let canvas = self.inked_canvas.as_mut().unwrap();
-    render::ink(canvas, shape, Point::default(), &self.engine);
+    let Session {
+      canvas,
+      engine,
+      ink,
+      ..
+    } = self;
+    let ink = ink.get_or_insert_with(|| Ink::fresh(canvas));
+    render::ink(&mut ink.canvas, shape, Point::default(), engine);
     // The backdrop is just a dimmed view of the canvas, so refresh it with a
     // cheap lookup-table pass instead of re-running the (much pricier)
     // anti-aliased stroke rasterizer a second time for the same shape.
-    let backdrop = self.inked_backdrop.as_mut().unwrap();
-    render::dimmed_into(backdrop, canvas);
+    render::dimmed_into(&mut ink.backdrop, &ink.canvas);
   }
 
   fn rebuild_ink(&mut self) {
-    if self.history.shapes().is_empty() {
-      self.inked_backdrop = None;
-      self.inked_canvas = None;
+    let Session {
+      canvas,
+      engine,
+      history,
+      ink,
+      ..
+    } = self;
+    if history.shapes().is_empty() {
+      // Nothing survives to replay, so release both buffers rather than hold
+      // two full-screen copies for an empty history.
+      *ink = None;
       return;
     }
-    self.ensure_ink_buffers();
-    let canvas = self.inked_canvas.as_mut().unwrap();
-    canvas.data_mut().copy_from_slice(self.canvas.data());
-    for shape in self.history.shapes() {
-      render::ink(canvas, shape, Point::default(), &self.engine);
+    let ink = ink.get_or_insert_with(|| Ink::fresh(canvas));
+    ink.canvas.data_mut().copy_from_slice(canvas.data());
+    for shape in history.shapes() {
+      render::ink(&mut ink.canvas, shape, Point::default(), engine);
     }
     // One dimmed pass over the fully replayed canvas beats re-stroking every
     // surviving shape a second time just for the backdrop.
-    let backdrop = self.inked_backdrop.as_mut().unwrap();
-    render::dimmed_into(backdrop, canvas);
+    render::dimmed_into(&mut ink.backdrop, &ink.canvas);
   }
 
   fn mouse_up(&mut self) {
+    // `Type` hands its buffer and anchor straight back: clicking while typing
+    // must keep the text, so that one mode survives the release.
     match std::mem::replace(&mut self.mode, Mode::Idle) {
       Mode::Rubber(_) => {
         self.selection = render::deliverable_region(self.selection);

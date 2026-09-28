@@ -204,30 +204,9 @@ fn round_rect_path(r: Rect, radius: f32) -> Option<Path> {
   path.finish()
 }
 
-type RoundRectKey = (u32, u32, u32);
-
-thread_local! {
-  static ROUND_RECT_CACHE: RefCell<HashMap<RoundRectKey, Path>> =
-    RefCell::new(HashMap::with_capacity(16));
-}
-
-fn cached_round_rect_geometry(w: f32, h: f32, radius: f32) -> Option<Path> {
-  let key = (w.to_bits(), h.to_bits(), radius.to_bits());
-  ROUND_RECT_CACHE.with(|cache| {
-    if let Some(path) = cache.borrow().get(&key) {
-      return Some(path.clone());
-    }
-    let r = Rect::from_xywh(0.0, 0.0, w, h)?;
-    let path = round_rect_path(r, radius)?;
-    cache.borrow_mut().insert(key, path.clone());
-    Some(path)
-  })
-}
-
 #[inline]
-fn rounded_path(rect: GeoRect, radius: f32) -> Option<(Path, Transform)> {
-  let path = cached_round_rect_geometry(rect.w, rect.h, radius)?;
-  Some((path, Transform::from_translate(rect.x, rect.y)))
+fn rounded_path(rect: GeoRect, radius: f32) -> Option<Path> {
+  round_rect_path(skia_rect(rect)?, radius)
 }
 
 pub fn rounded_fill(
@@ -237,14 +216,14 @@ pub fn rounded_fill(
   rgb: [u8; 3],
   alpha: u8,
 ) {
-  let Some((path, transform)) = rounded_path(rect, radius) else {
+  let Some(path) = rounded_path(rect, radius) else {
     return;
   };
   pm.fill_path(
     &path,
     &paint(rgb[0], rgb[1], rgb[2], alpha),
     FillRule::Winding,
-    transform,
+    Transform::identity(),
     None,
   );
 }
@@ -257,14 +236,14 @@ pub fn rounded_stroke(
   width: f32,
   alpha: u8,
 ) {
-  let Some((path, transform)) = rounded_path(rect, radius) else {
+  let Some(path) = rounded_path(rect, radius) else {
     return;
   };
   pm.stroke_path(
     &path,
     &paint(rgb[0], rgb[1], rgb[2], alpha),
     &stroke(width),
-    transform,
+    Transform::identity(),
     None,
   );
 }
@@ -466,25 +445,20 @@ mod tests {
   }
 
   #[test]
-  fn rounded_geometry_is_cached_and_reused_across_positions() {
-    let mut a = Pixmap::new(20, 20).expect("alloc");
-    let mut b = Pixmap::new(20, 20).expect("alloc");
+  fn rounded_fill_paints_inside_the_requested_rect_only() {
+    let mut pm = Pixmap::new(20, 20).expect("alloc");
     rounded_fill(
-      &mut a,
-      GeoRect::new(1.0, 1.0, 10.0, 10.0),
-      3.0,
-      [1, 2, 3],
-      255,
-    );
-    rounded_fill(
-      &mut b,
+      &mut pm,
       GeoRect::new(5.0, 5.0, 10.0, 10.0),
       3.0,
       [1, 2, 3],
       255,
     );
-    // Same cached geometry, different translation: both should still paint.
-    assert!(a.data().iter().any(|&p| p != 0));
-    assert!(b.data().iter().any(|&p| p != 0));
+    let alpha = |x: u32, y: u32| pm.data()[(y * 20 + x) as usize * 4 + 3];
+    assert!(
+      alpha(10, 10) > 0,
+      "the centre of the rect should be painted"
+    );
+    assert_eq!(alpha(1, 1), 0, "nothing should be painted outside the rect");
   }
 }

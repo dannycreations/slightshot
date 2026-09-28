@@ -61,6 +61,12 @@ pub struct Button {
   pub active: bool,
 }
 
+impl Button {
+  fn shown(&self) -> bool {
+    self.area.w > 0.0 && self.area.h > 0.0
+  }
+}
+
 const fn button(command: Command, icon: draw::Icon) -> Button {
   Button {
     command,
@@ -153,13 +159,13 @@ pub fn hotspot_at(chrome: &Chrome, p: Point) -> Option<Hotspot> {
   chrome
     .tools
     .iter()
-    .position(|b| b.area.contains(p))
+    .position(|b| b.shown() && b.area.contains(p))
     .map(Hotspot::Tool)
     .or_else(|| {
       chrome
         .actions
         .iter()
-        .position(|b| b.area.contains(p))
+        .position(|b| b.shown() && b.area.contains(p))
         .map(Hotspot::Action)
     })
 }
@@ -503,7 +509,7 @@ fn draw_button(
   hovered: bool,
   swatch: [u8; 3],
 ) {
-  if button.area.w <= 0.0 || button.area.h <= 0.0 {
+  if !button.shown() {
     return;
   }
   let bg_alpha = if hovered { 225 } else { 175 };
