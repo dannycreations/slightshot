@@ -26,6 +26,30 @@ pub const SIZE_STEP: f32 = 1.0;
 
 const MIN_DRAG: f32 = 3.0;
 
+#[inline(always)]
+pub fn stroke_alpha(marker: bool) -> u8 {
+  if marker {
+    MARKER_ALPHA
+  } else {
+    255
+  }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Segment {
+  pub from: Point,
+  pub to: Point,
+  pub color: [u8; 3],
+  pub width: f32,
+  pub alpha: u8,
+}
+
+impl Segment {
+  pub fn bounds(&self) -> Rect {
+    Rect::spanning(self.from, self.to).inflated(self.width * 0.5 + 1.0)
+  }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 #[repr(usize)]
 pub enum Tool {
@@ -108,11 +132,15 @@ pub enum Shape {
 impl Shape {
   pub fn set_width(&mut self, new_width: f32) {
     match self {
-      Shape::Stroke { width, .. }
-      | Shape::Line { width, .. }
-      | Shape::Outline { width, .. } => *width = new_width,
-      Shape::Caption { size, .. } => *size = new_width,
+      Shape::Line { width, .. } | Shape::Outline { width, .. } => {
+        *width = new_width
+      }
+      Shape::Stroke { .. } | Shape::Caption { .. } => {}
     }
+  }
+
+  pub fn is_stroke(&self) -> bool {
+    matches!(self, Shape::Stroke { .. })
   }
 
   pub fn is_complete(&self) -> bool {
@@ -174,6 +202,26 @@ mod tests {
     assert!(history.undo());
     assert!(history.shapes().is_empty());
     assert!(!history.undo());
+  }
+
+  #[test]
+  fn only_the_marker_paints_translucent() {
+    assert_eq!(stroke_alpha(true), MARKER_ALPHA);
+    assert_eq!(stroke_alpha(false), 255);
+  }
+
+  #[test]
+  fn segment_bounds_cover_the_round_caps() {
+    let segment = Segment {
+      from: Point::new(10.0, 10.0),
+      to: Point::new(30.0, 10.0),
+      color: [0, 0, 0],
+      width: 6.0,
+      alpha: 255,
+    };
+    // A round cap reaches half the width past the end point, and the padded
+    // box has to hold it plus the antialiased pixel outside it.
+    assert_eq!(segment.bounds(), Rect::new(6.0, 6.0, 28.0, 8.0));
   }
 
   #[test]

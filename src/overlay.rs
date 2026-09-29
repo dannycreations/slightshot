@@ -21,7 +21,7 @@ use windows::{
 use winit::{
   application::ApplicationHandler,
   dpi::{PhysicalPosition, PhysicalSize},
-  event::{ElementState, MouseButton, WindowEvent},
+  event::{DeviceEvent, DeviceId, ElementState, MouseButton, WindowEvent},
   event_loop::{ActiveEventLoop, ControlFlow},
   keyboard::{Key, ModifiersState, NamedKey},
   platform::windows::WindowAttributesExtWindows,
@@ -32,8 +32,8 @@ use winit::{
 use crate::{
   action::{self, Deliverable, Shot},
   annotate::{
-    active_color, History, Shape, Tool, MAX_SIZE, MIN_SIZE, PALETTE, SIZE_STEP,
-    TOOLS,
+    active_color, stroke_alpha, History, Segment, Shape, Tool, MAX_SIZE,
+    MIN_SIZE, PALETTE, SIZE_STEP, TOOLS,
   },
   capture,
   geom::{hit_handle, resized, Handle, Point, Rect},
@@ -44,6 +44,8 @@ use crate::{
 };
 
 const HINT_DURATION: Duration = Duration::from_millis(800);
+
+const MAX_STRETCH: f32 = 8.0;
 
 enum Outcome {
   Close,
@@ -66,7 +68,7 @@ impl Mode {
   #[inline(always)]
   fn draft(&self) -> Option<&Shape> {
     match self {
-      Mode::Draw(shape, _) => Some(shape),
+      Mode::Draw(shape, _) if !shape.is_stroke() => Some(shape),
       _ => None,
     }
   }
@@ -83,6 +85,17 @@ impl Mode {
   fn shows_chrome(&self) -> bool {
     matches!(self, Mode::Idle | Mode::Draw(_, _) | Mode::Type(_, _))
   }
+
+  #[inline(always)]
+  fn stroking(&self) -> bool {
+    matches!(self, Mode::Draw(shape, _) if shape.is_stroke())
+  }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Step {
+  Repaint,
+  Segment(Segment),
 }
 
 type Surface = SoftSurface<Arc<Window>, Arc<Window>>;
@@ -94,10 +107,14 @@ struct Ink {
 
 impl Ink {
   fn fresh(canvas: &Pixmap) -> Self {
+    // The backdrop starts dimmed over the whole capture, so a stroke that is
+    // still being drawn only has to dim the box it just added.
+    let mut backdrop = Pixmap::new(canvas.width(), canvas.height())
+      .expect("backdrop allocation failed");
+    render::dimmed_into(&mut backdrop, canvas);
     Self {
       canvas: canvas.clone(),
-      backdrop: Pixmap::new(canvas.width(), canvas.height())
-        .expect("backdrop allocation failed"),
+      backdrop,
     }
   }
 
@@ -122,6 +139,7 @@ struct Session {
   history: History,
   engine: TextEngine,
   cursor: Point,
+  raw_path: Vec<Point>,
   hover: Option<Hotspot>,
   chrome: Chrome,
   modifiers: ModifiersState,
@@ -201,6 +219,19 @@ impl ApplicationHandler<Trigger> for App {
         }
       }
       _ => {}
+    }
+  }
+
+  fn device_event(
+    &mut self,
+    _event_loop: &ActiveEventLoop,
+    _device_id: DeviceId,
+    event: DeviceEvent,
+  ) {
+    if let DeviceEvent::MouseMotion { delta } = event {
+      if let Some(session) = self.session.as_mut() {
+        session.pointer_motion(delta);
+      }
     }
   }
 
@@ -294,6 +325,7 @@ impl Session {
       history: History::default(),
       engine,
       cursor: Point::default(),
+      raw_path: Vec::new(),
       hover: None,
       chrome: Chrome::default(),
       modifiers: ModifiersState::default(),
@@ -378,6 +410,33 @@ impl Session {
 
   fn mouse_move(&mut self, position: PhysicalPosition<f64>) {
     let p = Point::new(position.x as f32, position.y as f32);
+    if self.mode.stroking() {
+      self.place_reports(p);
+    }
+    self.pointer_at(p);
+  }
+
+  fn pointer_motion(&mut self, delta: (f64, f64)) {
+    if !self.mode.stroking() {
+      return;
+    }
+    let from = self.raw_path.last().copied().unwrap_or(self.cursor);
+    self
+      .raw_path
+      .push(Point::new(from.x + delta.0 as f32, from.y + delta.1 as f32));
+  }
+
+  fn place_reports(&mut self, to: Point) {
+    let from = self.cursor;
+    let mut reports = mem::take(&mut self.raw_path);
+    if place_burst(&mut reports, from, to) {
+      for point in reports {
+        self.pointer_at(point);
+      }
+    }
+  }
+
+  fn pointer_at(&mut self, p: Point) {
     if self.cursor == p {
       return;
     }
@@ -391,6 +450,7 @@ impl Session {
     if self.hover != previous {
       self.window.request_redraw();
     }
+    let mut step = None;
     match &mut self.mode {
       Mode::Idle => {
         let icon = match (self.tool, self.selection) {
@@ -411,9 +471,7 @@ impl Session {
         }
       }
       Mode::Draw(draft, anchor) => {
-        if extend_draft(*anchor, draft, p) {
-          self.window.request_redraw();
-        }
+        step = extend_draft(*anchor, draft, p);
       }
       Mode::Move(last) => {
         let sel = self.selection.expect("move mode requires a selection");
@@ -434,6 +492,14 @@ impl Session {
         }
       }
       Mode::Type(_, _) => {}
+    }
+    match step {
+      None => {}
+      Some(Step::Repaint) => self.window.request_redraw(),
+      Some(Step::Segment(segment)) => {
+        self.ink_segment(segment);
+        self.window.request_redraw();
+      }
     }
   }
 
@@ -462,6 +528,11 @@ impl Session {
       Tool::Label => Mode::Type(String::new(), p),
       tool => Mode::Draw(self.new_shape(tool, p), p),
     };
+    if self.mode.stroking() {
+      // A stroke that ended before the system reported a position left
+      // reports behind. The next one starts from the cursor, not from them.
+      self.raw_path.clear();
+    }
     self.window.request_redraw();
     None
   }
@@ -544,6 +615,12 @@ impl Session {
     ink.stamp(engine, shape);
   }
 
+  fn ink_segment(&mut self, segment: Segment) {
+    let Session { canvas, ink, .. } = self;
+    let ink = ink.get_or_insert_with(|| Ink::fresh(canvas));
+    render::ink_segment(&mut ink.canvas, &mut ink.backdrop, segment);
+  }
+
   fn rebuild_ink(&mut self) {
     let Session {
       canvas,
@@ -574,7 +651,11 @@ impl Session {
         self.selection = render::deliverable_region(self.selection);
       }
       Mode::Draw(draft, _) if draft.is_complete() => {
-        self.ink_shape(&draft);
+        // A stroke is already on the ink, segment by segment. Inking it again
+        // here would composite the whole log over itself a second time.
+        if !draft.is_stroke() {
+          self.ink_shape(&draft);
+        }
         self.history.push(draft);
       }
       Mode::Type(buffer, anchor) => {
@@ -686,35 +767,60 @@ fn format_size(size: f32) -> String {
   }
 }
 
-fn extend_draft(anchor: Point, draft: &mut Shape, p: Point) -> bool {
+fn stretch(reported: f32, moved: f32) -> Option<f32> {
+  let factor = moved / reported;
+  (factor.is_finite() && factor.abs() <= MAX_STRETCH).then_some(factor)
+}
+
+fn place_burst(reports: &mut [Point], from: Point, to: Point) -> bool {
+  let Some(last) = reports.last().copied() else {
+    return false;
+  };
+  let (Some(kx), Some(ky)) = (
+    stretch(last.x - from.x, to.x - from.x),
+    stretch(last.y - from.y, to.y - from.y),
+  ) else {
+    return false;
+  };
+  for point in reports.iter_mut() {
+    point.x = from.x + (point.x - from.x) * kx;
+    point.y = from.y + (point.y - from.y) * ky;
+  }
+  true
+}
+
+fn extend_draft(anchor: Point, draft: &mut Shape, p: Point) -> Option<Step> {
   match draft {
-    Shape::Stroke { points, .. } => {
-      if points
-        .last()
-        .is_none_or(|last| last.distance_squared(p) >= 1.0)
-      {
-        points.push(p);
-        true
-      } else {
-        false
-      }
+    Shape::Stroke {
+      points,
+      color,
+      width,
+      marker,
+    } => {
+      let segment = Segment {
+        from: points.last().copied().unwrap_or(p),
+        to: p,
+        color: *color,
+        width: *width,
+        alpha: stroke_alpha(*marker),
+      };
+      points.push(p);
+      Some(Step::Segment(segment))
     }
     Shape::Line { to, .. } | Shape::Caption { at: to, .. } => {
-      if *to != p {
-        *to = p;
-        true
-      } else {
-        false
+      if *to == p {
+        return None;
       }
+      *to = p;
+      Some(Step::Repaint)
     }
     Shape::Outline { rect, .. } => {
       let new_rect = Rect::spanning(anchor, p);
-      if *rect != new_rect {
-        *rect = new_rect;
-        true
-      } else {
-        false
+      if *rect == new_rect {
+        return None;
       }
+      *rect = new_rect;
+      Some(Step::Repaint)
     }
   }
 }
@@ -736,22 +842,67 @@ mod tests {
   use crate::geom::{handle_anchor, HANDLES};
 
   #[test]
-  fn extend_draft_appends_to_paths_and_resizes_boxes() {
-    let mut free = Shape::Stroke {
+  fn extend_draft_reports_the_segment_a_stroke_gained() {
+    let mut stroke = Shape::Stroke {
+      points: vec![Point::new(1.0, 1.0)],
+      color: [7, 8, 9],
+      width: 3.0,
+      marker: true,
+    };
+    assert_eq!(
+      extend_draft(Point::new(1.0, 1.0), &mut stroke, Point::new(5.0, 5.0)),
+      Some(Step::Segment(Segment {
+        from: Point::new(1.0, 1.0),
+        to: Point::new(5.0, 5.0),
+        color: [7, 8, 9],
+        width: 3.0,
+        alpha: stroke_alpha(true),
+      }))
+    );
+    assert_eq!(
+      stroke,
+      Shape::Stroke {
+        points: vec![Point::new(1.0, 1.0), Point::new(5.0, 5.0)],
+        color: [7, 8, 9],
+        width: 3.0,
+        marker: true,
+      }
+    );
+  }
+
+  #[test]
+  fn extend_draft_logs_moves_smaller_than_a_pixel() {
+    // Sampling used to drop anything under a pixel. The log is raw now, so a
+    // stroke taken slowly still follows the cursor.
+    let mut stroke = Shape::Stroke {
       points: vec![Point::new(1.0, 1.0)],
       color: [0, 0, 0],
       width: 2.0,
       marker: false,
     };
-    extend_draft(Point::new(0.0, 0.0), &mut free, Point::new(5.0, 5.0));
+    let nudge = Point::new(1.2, 1.0);
+    assert!(matches!(
+      extend_draft(Point::new(1.0, 1.0), &mut stroke, nudge),
+      Some(Step::Segment(_))
+    ));
+    let Shape::Stroke { points, .. } = &stroke else {
+      panic!("the draft is a stroke");
+    };
+    assert_eq!(points, &[Point::new(1.0, 1.0), nudge]);
+  }
+
+  #[test]
+  fn extend_draft_reports_no_step_when_the_cursor_does_not_move() {
+    let mut line = Shape::Line {
+      from: Point::new(0.0, 0.0),
+      to: Point::new(4.0, 4.0),
+      color: [0, 0, 0],
+      width: 2.0,
+      arrow: false,
+    };
     assert_eq!(
-      free,
-      Shape::Stroke {
-        points: vec![Point::new(1.0, 1.0), Point::new(5.0, 5.0)],
-        color: [0, 0, 0],
-        width: 2.0,
-        marker: false,
-      }
+      extend_draft(Point::new(0.0, 0.0), &mut line, Point::new(4.0, 4.0)),
+      None
     );
 
     let mut boxed = Shape::Outline {
@@ -759,15 +910,113 @@ mod tests {
       color: [0, 0, 0],
       width: 2.0,
     };
-    extend_draft(Point::new(10.0, 20.0), &mut boxed, Point::new(40.0, 60.0));
     assert_eq!(
-      boxed,
-      Shape::Outline {
-        rect: Rect::new(10.0, 20.0, 30.0, 40.0),
+      extend_draft(Point::new(10.0, 20.0), &mut boxed, Point::new(40.0, 60.0)),
+      Some(Step::Repaint)
+    );
+    assert_eq!(
+      extend_draft(Point::new(10.0, 20.0), &mut boxed, Point::new(40.0, 60.0)),
+      None,
+      "a box that has not moved should not ask for another frame"
+    );
+  }
+
+  #[test]
+  fn a_burst_of_reports_is_pinned_to_both_cursor_positions() {
+    // The reports know the shape of the path, not where the cursor ended up:
+    // Windows scales the position it reports for pointer speed, so a fast
+    // stroke arrives short and the ink would trail the cursor. Anchoring only
+    // one end leaves a gap, so both ends have to land on the cursor.
+    let from = Point::new(100.0, 100.0);
+    let mut reports =
+      vec![from, Point::new(104.0, 101.0), Point::new(108.0, 104.0)];
+    assert!(place_burst(&mut reports, from, Point::new(120.0, 120.0)));
+    assert_eq!(reports[0], from, "the burst starts on the old cursor");
+    assert_eq!(
+      reports[2],
+      Point::new(120.0, 120.0),
+      "and ends on the new one, or the ink drifts off the cursor"
+    );
+    assert_eq!(
+      reports[1],
+      Point::new(110.0, 105.0),
+      "the turn between the ends is the hand's, and has to survive"
+    );
+  }
+
+  #[test]
+  fn a_burst_that_says_nothing_about_the_gap_is_not_drawn() {
+    let from = Point::new(100.0, 100.0);
+    // The reports went nowhere while the cursor crossed the screen. The
+    // straight line is the honest answer, and drawing the reports where they
+    // landed would put ink off the cursor.
+    let mut still = vec![from, from, from];
+    assert!(!place_burst(&mut still, from, Point::new(400.0, 100.0)));
+
+    // A drag straight along one axis is rejected too, because there is no
+    // direction to stretch and the straight line already is its path. A rule
+    // that looks like a defect here is the whole difference between a level
+    // line and a wiggle drawn through it.
+    let mut level = vec![from, Point::new(110.0, 100.0)];
+    assert!(!place_burst(&mut level, from, Point::new(110.0, 100.0)));
+
+    // A drag that already matches the cursor keeps the ink where it is.
+    let mut agreed =
+      vec![from, Point::new(105.0, 105.0), Point::new(110.0, 110.0)];
+    let expected = agreed.clone();
+    assert!(place_burst(&mut agreed, from, Point::new(110.0, 110.0),));
+    assert_eq!(agreed, expected);
+  }
+
+  #[test]
+  fn stretch_rejects_a_gap_the_reports_do_not_account_for() {
+    // A mouse held still reports no distance at all, and a report the app
+    // never received leaves the survivors far shorter than the cursor moved.
+    // Either way the straight line between two cursor positions is the honest
+    // answer, and a rejected factor must not reach the path maths as a NaN.
+    assert_eq!(stretch(0.0, 0.0), None);
+    assert_eq!(stretch(0.0, 40.0), None);
+    assert_eq!(stretch(2.0, 100.0), None, "a factor of 50 is a lost report");
+    assert_eq!(stretch(20.0, 30.0), Some(1.5), "pointer speed, or reports");
+    assert_eq!(
+      stretch(30.0, 20.0),
+      Some(20.0 / 30.0),
+      "a path that doubled back"
+    );
+  }
+
+  #[test]
+  fn only_a_stroke_takes_the_pointer_from_the_raw_feed() {
+    // Windows merges the mouse positions it cannot deliver in time, so a
+    // stroke has to be built from the raw reports instead. A tool that
+    // settles on a position rather than following a path reads fine from
+    // the merged feed, and collecting reports for it as well would drag it
+    // around for motion the user never made.
+    let stroke = || {
+      Mode::Draw(
+        Shape::Stroke {
+          points: vec![Point::new(0.0, 0.0)],
+          color: [0, 0, 0],
+          width: 2.0,
+          marker: false,
+        },
+        Point::new(0.0, 0.0),
+      )
+    };
+    assert!(stroke().stroking(), "a stroke follows the raw reports");
+    assert!(!Mode::Idle.stroking());
+    assert!(!Mode::Draw(
+      Shape::Line {
+        from: Point::new(0.0, 0.0),
+        to: Point::new(4.0, 4.0),
         color: [0, 0, 0],
         width: 2.0,
-      }
-    );
+        arrow: false,
+      },
+      Point::new(0.0, 0.0)
+    )
+    .stroking());
+    assert!(!Mode::Rubber(Point::new(0.0, 0.0)).stroking());
   }
 
   #[test]

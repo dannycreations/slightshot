@@ -46,7 +46,7 @@ pub fn polyline(
   width: f32,
   alpha: u8,
 ) {
-  let Some(path) = smooth_path(pts) else {
+  let Some(path) = straight_path(pts) else {
     return;
   };
   pm.stroke_path(
@@ -58,32 +58,15 @@ pub fn polyline(
   );
 }
 
-fn smooth_path(points: &[Point]) -> Option<Path> {
-  if points.len() < 2 {
+fn straight_path(points: &[Point]) -> Option<Path> {
+  let (first, rest) = points.split_first()?;
+  if rest.is_empty() {
     return None;
   }
-
   let mut builder = PathBuilder::new();
-  builder.move_to(points[0].x, points[0].y);
-  if points.len() == 2 {
-    builder.line_to(points[1].x, points[1].y);
-    return builder.finish();
-  }
-
-  const ONE_SIXTH: f32 = 1.0 / 6.0;
-  let len = points.len();
-  for i in 0..len - 1 {
-    let p0 = points[i.saturating_sub(1)];
-    let p1 = points[i];
-    let p2 = points[i + 1];
-    let p3 = points[(i + 2).min(len - 1)];
-
-    let c1x = p1.x + (p2.x - p0.x) * ONE_SIXTH;
-    let c1y = p1.y + (p2.y - p0.y) * ONE_SIXTH;
-    let c2x = p2.x - (p3.x - p1.x) * ONE_SIXTH;
-    let c2y = p2.y - (p3.y - p1.y) * ONE_SIXTH;
-
-    builder.cubic_to(c1x, c1y, c2x, c2y, p2.x, p2.y);
+  builder.move_to(first.x, first.y);
+  for p in rest {
+    builder.line_to(p.x, p.y);
   }
   builder.finish()
 }
@@ -375,6 +358,44 @@ mod tests {
       .iter()
       .any(|p| p[0] == 255 && p[3] == 255);
     assert!(painted, "expected at least one red, opaque pixel");
+  }
+
+  #[test]
+  fn polyline_keeps_the_ink_on_the_line_between_two_samples() {
+    fn alpha(pm: &Pixmap, x: u32, y: u32) -> u8 {
+      pm.data()[(y * 64 + x) as usize * 4 + 3]
+    }
+    let mut pm = Pixmap::new(64, 64).expect("alloc");
+    // A right angle. Smoothing fitted a curve through the samples that bowed
+    // well clear of the first leg, so what pins the raw log is that the ink
+    // stays on the segment joining two samples.
+    polyline(
+      &mut pm,
+      &[
+        Point::new(8.0, 8.0),
+        Point::new(56.0, 8.0),
+        Point::new(8.0, 56.0),
+      ],
+      [255, 0, 0],
+      2.0,
+      255,
+    );
+    assert!(
+      alpha(&pm, 34, 8) > 200,
+      "the first leg runs along y = 8 and should be inked there"
+    );
+    assert_eq!(
+      alpha(&pm, 34, 4),
+      0,
+      "nothing four pixels off the first leg should be inked"
+    );
+  }
+
+  #[test]
+  fn polyline_ignores_a_lone_sample() {
+    let mut pm = Pixmap::new(24, 24).expect("alloc");
+    polyline(&mut pm, &[Point::new(12.0, 12.0)], [255, 0, 0], 4.0, 255);
+    assert_eq!(pm.data(), &[0u8; 24 * 24 * 4][..]);
   }
 
   #[test]

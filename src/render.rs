@@ -2,7 +2,7 @@ use tiny_skia::Pixmap;
 
 use crate::{
   action::{Deliverable, Shot},
-  annotate::{active_color, History, Shape, Tool, MARKER_ALPHA},
+  annotate::{active_color, stroke_alpha, History, Segment, Shape, Tool},
   draw,
   geom::{clamp_span, handle_anchor, Point, Rect, HANDLES},
   text::TextEngine,
@@ -285,6 +285,56 @@ pub fn dimmed_into(dst: &mut Pixmap, src: &Pixmap) {
   }
 }
 
+fn dim_region_into(dst: &mut Pixmap, src: &Pixmap, rect: Rect) {
+  let (x0, y0, width, height) = region_pixels(
+    rect,
+    src.width().min(dst.width()),
+    src.height().min(dst.height()),
+  );
+  if width == 0 || height == 0 {
+    return;
+  }
+  let row_bytes = width as usize * 4;
+  let (src_stride, dst_stride) =
+    (src.width() as usize * 4, dst.width() as usize * 4);
+  let (src_data, dst_data) = (src.data(), dst.data_mut());
+  for row in 0..height as usize {
+    let y = y0 as usize + row;
+    let from = y * src_stride + x0 as usize * 4;
+    let to = y * dst_stride + x0 as usize * 4;
+    let (src_pixels, dst_pixels) = (
+      &src_data[from..from + row_bytes],
+      &mut dst_data[to..to + row_bytes],
+    );
+    for (src_px, dst_px) in src_pixels
+      .as_chunks::<4>()
+      .0
+      .iter()
+      .zip(dst_pixels.as_chunks_mut::<4>().0)
+    {
+      dst_px[0] = DIM_LUT[src_px[0] as usize];
+      dst_px[1] = DIM_LUT[src_px[1] as usize];
+      dst_px[2] = DIM_LUT[src_px[2] as usize];
+      dst_px[3] = src_px[3];
+    }
+  }
+}
+
+pub(crate) fn ink_segment(
+  canvas: &mut Pixmap,
+  backdrop: &mut Pixmap,
+  segment: Segment,
+) {
+  draw::polyline(
+    canvas,
+    &[segment.from, segment.to],
+    segment.color,
+    segment.width,
+    segment.alpha,
+  );
+  dim_region_into(backdrop, canvas, segment.bounds());
+}
+
 pub fn dimmed_copy(frame: &Pixmap) -> Pixmap {
   let mut out =
     Pixmap::new(frame.width(), frame.height()).expect("valid frame dimensions");
@@ -377,8 +427,7 @@ pub(crate) fn ink(pm: &mut Pixmap, shape: &Shape, engine: &TextEngine) {
       width,
       marker,
     } => {
-      let alpha = if *marker { MARKER_ALPHA } else { 255 };
-      draw::polyline(pm, points, *color, *width, alpha);
+      draw::polyline(pm, points, *color, *width, stroke_alpha(*marker));
     }
     Shape::Line {
       from,
@@ -603,6 +652,52 @@ mod tests {
     dst.data_mut().iter_mut().for_each(|b| *b = 77);
     dimmed_into(&mut dst, &src);
     assert_eq!(dst.data(), dimmed_copy(&src).data());
+  }
+
+  #[test]
+  fn dim_region_into_leaves_the_rest_of_the_backdrop_alone() {
+    let mut src = Pixmap::new(2, 1).unwrap();
+    src
+      .data_mut()
+      .copy_from_slice(&[200, 200, 200, 255, 200, 200, 200, 255]);
+    let mut dst = Pixmap::new(2, 1).unwrap();
+    dst.data_mut().iter_mut().for_each(|b| *b = 77);
+    dim_region_into(&mut dst, &src, Rect::new(0.0, 0.0, 1.0, 1.0));
+    assert_eq!(dst.data()[0], ((200 * 150 + 127) / 255) as u8);
+    assert_eq!(
+      dst.data()[4],
+      77,
+      "a pixel outside the stamped box must not be dimmed"
+    );
+  }
+
+  #[test]
+  fn ink_segment_keeps_the_backdrop_equal_to_a_full_dim() {
+    // A live stroke dims one segment's box at a time instead of the whole
+    // screen, which is only correct while that box covers every pixel the
+    // segment touched, round caps included.
+    let mut canvas = Pixmap::new(32, 32).unwrap();
+    canvas.data_mut().iter_mut().for_each(|b| *b = 200);
+    let mut backdrop = Pixmap::new(32, 32).unwrap();
+    dimmed_into(&mut backdrop, &canvas);
+
+    ink_segment(
+      &mut canvas,
+      &mut backdrop,
+      Segment {
+        from: Point::new(4.0, 4.0),
+        to: Point::new(24.0, 4.0),
+        color: [255, 0, 0],
+        width: 4.0,
+        alpha: 255,
+      },
+    );
+
+    assert_eq!(
+      backdrop.data(),
+      dimmed_copy(&canvas).data(),
+      "the segment's bounds should cover every pixel it inked"
+    );
   }
 
   #[test]
