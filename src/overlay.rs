@@ -101,6 +101,50 @@ enum Step {
 
 type Surface = SoftSurface<Arc<Window>, Arc<Window>>;
 
+#[derive(Default)]
+struct Buffer(Option<Pixmap>);
+
+impl Buffer {
+  fn fit(&mut self, size: (u32, u32)) -> Result<&mut Pixmap> {
+    if !self
+      .0
+      .as_ref()
+      .is_some_and(|pm| (pm.width(), pm.height()) == size)
+    {
+      self.0 = Some(
+        Pixmap::new(size.0, size.1)
+          .context("allocating a full-screen buffer failed")?,
+      );
+    }
+    Ok(self.0.as_mut().expect("just ensured"))
+  }
+
+  fn at(&mut self) -> &mut Pixmap {
+    self
+      .0
+      .as_mut()
+      .expect("a session sizes its buffers before it opens")
+  }
+}
+
+fn section(
+  slot: &mut Option<capture::Bitmap>,
+  size: (u32, u32),
+) -> Result<&mut capture::Bitmap> {
+  if !slot.as_ref().is_some_and(|s| s.fits(size)) {
+    *slot = Some(capture::Bitmap::new(size.0, size.1)?);
+  }
+  Ok(slot.as_mut().expect("the desktop has a nonzero size"))
+}
+
+#[derive(Default)]
+struct Screen {
+  shot: Option<capture::Bitmap>,
+  canvas: Buffer,
+  backdrop: Buffer,
+  frame: Buffer,
+}
+
 enum Presenter {
   Solid(Surface),
   Live(Layered),
@@ -131,10 +175,8 @@ impl Presenter {
 struct Session {
   window: Arc<Window>,
   backdrop_kind: Backdrop,
-  base: Pixmap,
-  canvas: Pixmap,
-  backdrop: Pixmap,
-  frame: Pixmap,
+  base: Option<Pixmap>,
+  buffers: Screen,
   presenter: Presenter,
   bounds: Rect,
   selection: Option<Rect>,
@@ -156,6 +198,7 @@ struct Session {
 #[derive(Default)]
 pub struct App {
   session: Option<Session>,
+  screen: Option<Screen>,
 }
 
 impl ApplicationHandler<Trigger> for App {
@@ -180,18 +223,30 @@ impl ApplicationHandler<Trigger> for App {
     _id: WindowId,
     event: WindowEvent,
   ) {
+    // The events that end a session have to be answered before the session is
+    // borrowed, because answering one means putting that borrow down.
+    match &event {
+      WindowEvent::CloseRequested => return self.close(),
+      WindowEvent::KeyboardInput { event, .. }
+        if event.state == ElementState::Pressed
+          && event.logical_key == Key::Named(NamedKey::Escape) =>
+      {
+        return self.close()
+      }
+      _ => {}
+    }
     let Some(session) = self.session.as_mut() else {
       return;
     };
     match event {
-      WindowEvent::CloseRequested => self.session = None,
       WindowEvent::ModifiersChanged(state) => session.modifiers = state.state(),
       WindowEvent::RedrawRequested => {
-        if let Err(error) = session.render() {
+        let outcome = session.render();
+        if let Err(error) = outcome {
           // The overlay is still a full-screen window even when nothing shows
           // through it, so a dead presenter has to give the desktop back.
           eprintln!("slightshot: the overlay stopped presenting: {error:#}");
-          self.session = None;
+          self.close();
         }
       }
       WindowEvent::CursorMoved { position, .. } => session.mouse_move(position),
@@ -212,7 +267,6 @@ impl ApplicationHandler<Trigger> for App {
           return;
         }
         match event.logical_key {
-          Key::Named(NamedKey::Escape) => self.session = None,
           Key::Named(NamedKey::Enter) => session.commit_label(),
           Key::Named(NamedKey::Backspace) => session.backspace(),
           Key::Character(ch) => {
@@ -254,7 +308,9 @@ impl App {
     if self.session.is_some() {
       return;
     }
-    match Session::create(event_loop, backdrop) {
+    // A press that fails to open should not leave the buffers locked up here.
+    let screen = self.screen.take().unwrap_or_default();
+    match Session::create(event_loop, backdrop, screen) {
       Ok(session) => self.session = Some(session),
       Err(error) => {
         eprintln!("slightshot: could not open the overlay: {error:#}")
@@ -262,8 +318,14 @@ impl App {
     }
   }
 
+  fn close(&mut self) {
+    if let Some(session) = self.session.take() {
+      self.screen = Some(session.buffers);
+    }
+  }
+
   fn finish(&mut self, outcome: Outcome) {
-    self.session = None;
+    self.close();
     let Outcome::Deliver { deliverable, shot } = outcome else {
       return;
     };
@@ -275,23 +337,40 @@ impl App {
 }
 
 impl Session {
-  fn create(event_loop: &ActiveEventLoop, backdrop: Backdrop) -> Result<Self> {
+  fn create(
+    event_loop: &ActiveEventLoop,
+    backdrop: Backdrop,
+    mut buffers: Screen,
+  ) -> Result<Self> {
     let desktop = capture::desktop().context("reading the display failed")?;
     let engine = TextEngine::load()?;
     let origin = desktop.origin;
-    let canvas = match backdrop {
-      Backdrop::Frozen => {
-        capture::grab(&desktop).context("screen capture failed")?
-      }
-      Backdrop::Live => live_canvas(desktop.size)?,
-    };
+    let size = desktop.size;
+    let Screen {
+      shot,
+      canvas,
+      backdrop: dim,
+      frame,
+    } = &mut buffers;
+
+    // Capture and dim first: everything after this is window plumbing, and
+    // doing the pixel work up front means the window is only ever created once
+    // there is something real to show in it.
+    let canvas = canvas.fit(size)?;
+    match backdrop {
+      Backdrop::Frozen => section(shot, size)?
+        .capture_into(&desktop, canvas.data_mut())
+        .context("screen capture failed")?,
+      Backdrop::Live => canvas.fill(Color::from_rgba8(0, 0, 0, 1)),
+    }
+    render::dimmed_into(dim.fit(size)?, canvas);
+
     let bounds = Rect::new(
       origin.0 as f32,
       origin.1 as f32,
-      canvas.width() as f32,
-      canvas.height() as f32,
+      size.0 as f32,
+      size.1 as f32,
     );
-    let dimmed = render::dimmed_copy(&canvas);
     let attributes = Window::default_attributes()
       .with_title("slightshot")
       .with_window_level(WindowLevel::AlwaysOnTop)
@@ -310,23 +389,20 @@ impl Session {
       bail!("the overlay window is not a Win32 window");
     };
     quiet_window(handle);
-    let size = (canvas.width(), canvas.height());
     let presenter = match backdrop {
       Backdrop::Frozen => Presenter::Solid(solid_surface(&window, size)?),
       Backdrop::Live => Presenter::Live(Layered::new(handle, size.0, size.1)?),
     };
-
-    let frame = Pixmap::new(canvas.width(), canvas.height())
-      .context("allocating the overlay frame failed")?;
+    // Reserving the scratch frame here keeps the allocation off the first paint,
+    // so a press only ever pays for one it has not made before.
+    frame.fit(size)?;
 
     let (selection, tool) = opening(bounds, backdrop);
     let mut session = Self {
       window,
       backdrop_kind: backdrop,
-      base: canvas.clone(),
-      canvas,
-      backdrop: dimmed,
-      frame,
+      base: None,
+      buffers,
       presenter,
       bounds,
       selection,
@@ -379,28 +455,38 @@ impl Session {
       self.backdrop_kind,
     );
     let label_size = self.size(Tool::Label);
-    let frame = &mut self.frame;
-    render::paint(
+    let draft = self.mode.draft();
+    let typing = self
+      .mode
+      .typing()
+      .map(|(at, buffer)| (at, buffer, label_size));
+    let hint = self.hint.as_ref().map(|(text, _)| text.as_str());
+    let Screen {
+      canvas,
+      backdrop,
       frame,
+      ..
+    } = &mut self.buffers;
+    let canvas = canvas.at();
+    let backdrop = backdrop.at();
+    render::paint(
+      frame.at(),
       &Scene {
-        backdrop: &self.backdrop,
-        canvas: &self.canvas,
+        backdrop,
+        canvas,
         bounds: self.bounds,
         selection: self.selection,
         kind: self.backdrop_kind,
-        draft: self.mode.draft(),
-        typing: self
-          .mode
-          .typing()
-          .map(|(at, buffer)| (at, buffer, label_size)),
+        draft,
+        typing,
         palette_index: self.palette_index,
         chrome: &self.chrome,
         hotspot: self.hover,
         text: &self.engine,
-        hint: self.hint.as_ref().map(|(text, _)| text.as_str()),
+        hint,
       },
     );
-    self.presenter.present(&self.frame)
+    self.presenter.present(frame.at())
   }
 
   fn mouse_move(&mut self, position: PhysicalPosition<f64>) {
@@ -595,27 +681,58 @@ impl Session {
       return None;
     }
     let sel = render::deliverable_region(self.selection)?;
+    let canvas = self
+      .buffers
+      .canvas
+      .0
+      .as_ref()
+      .expect("a session has a canvas");
     Some(Outcome::Deliver {
       deliverable,
-      shot: render::flatten(&self.canvas, sel),
+      shot: render::flatten(canvas, sel),
     })
   }
 
+  fn snapshot(&mut self) {
+    if self.base.is_some() {
+      return;
+    }
+    self.base = Some(self.buffers.canvas.at().clone());
+  }
+
   fn ink_shape(&mut self, shape: &Shape) {
-    render::ink(&mut self.canvas, shape, &self.engine);
-    render::dimmed_into(&mut self.backdrop, &self.canvas);
+    self.snapshot();
+    let Screen {
+      canvas, backdrop, ..
+    } = &mut self.buffers;
+    let canvas = canvas.at();
+    render::ink(canvas, shape, &self.engine);
+    render::dimmed_into(backdrop.at(), canvas);
   }
 
   fn ink_segment(&mut self, segment: Segment) {
-    render::ink_segment(&mut self.canvas, &mut self.backdrop, segment);
+    self.snapshot();
+    let Screen {
+      canvas, backdrop, ..
+    } = &mut self.buffers;
+    render::ink_segment(canvas.at(), backdrop.at(), segment);
   }
 
   fn replay(&mut self) {
-    self.canvas.data_mut().copy_from_slice(self.base.data());
+    let Some(base) = &self.base else {
+      // Nothing was ever inked, so the canvas is still the capture and undo has
+      // nothing to put back.
+      return;
+    };
+    let Screen {
+      canvas, backdrop, ..
+    } = &mut self.buffers;
+    let canvas = canvas.at();
+    canvas.data_mut().copy_from_slice(base.data());
     for shape in self.history.shapes() {
-      render::ink(&mut self.canvas, shape, &self.engine);
+      render::ink(canvas, shape, &self.engine);
     }
-    render::dimmed_into(&mut self.backdrop, &self.canvas);
+    render::dimmed_into(backdrop.at(), canvas);
   }
 
   fn mouse_up(&mut self) {
@@ -751,13 +868,6 @@ fn solid_surface(window: &Arc<Window>, size: (u32, u32)) -> Result<Surface> {
   Ok(surface)
 }
 
-fn live_canvas(size: (u32, u32)) -> Result<Pixmap> {
-  let mut canvas =
-    Pixmap::new(size.0, size.1).context("allocating the live canvas failed")?;
-  canvas.fill(Color::from_rgba8(0, 0, 0, 1));
-  Ok(canvas)
-}
-
 fn format_size(size: f32) -> String {
   if size.fract() == 0.0 {
     format!("{}", size as i32)
@@ -852,6 +962,31 @@ mod tests {
 
   use super::*;
   use crate::geom::{handle_anchor, HANDLES};
+
+  #[test]
+  fn a_buffer_is_reallocated_only_when_the_desktop_changes_shape() {
+    let mut buffer = Buffer::default();
+    let at = buffer.fit((800, 600)).expect("a first fit");
+    assert_eq!((at.width(), at.height()), (800, 600));
+    let first = at.data_mut().as_mut_ptr();
+
+    // The whole point of parking these between sessions is that the memory
+    // survives, so a second press does not fault in every page again.
+    let again = buffer.fit((800, 600)).expect("a repeat fit");
+    assert_eq!(
+      again.data_mut().as_mut_ptr(),
+      first,
+      "an unchanged desktop must keep the same allocation"
+    );
+
+    let wider = buffer.fit((1920, 1080)).expect("a resized fit");
+    assert_eq!((wider.width(), wider.height()), (1920, 1080));
+    assert_ne!(
+      wider.data_mut().as_mut_ptr(),
+      first,
+      "a new shape needs new memory, not a stale buffer"
+    );
+  }
 
   #[test]
   fn a_live_overlay_opens_covering_the_screen_with_the_pen_out() {

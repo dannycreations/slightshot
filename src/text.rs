@@ -4,6 +4,7 @@ use std::{
   env, fs,
   path::Path,
   sync::OnceLock,
+  thread,
 };
 
 use anyhow::{anyhow, Result};
@@ -52,6 +53,12 @@ pub struct TextEngine {
   font: &'static Font,
   glyphs: RefCell<HashMap<(char, u32), GlyphInfo>>,
   atlas: RefCell<Vec<u8>>,
+}
+
+pub fn warm() {
+  thread::spawn(|| {
+    system_font();
+  });
 }
 
 impl TextEngine {

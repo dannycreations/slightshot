@@ -36,6 +36,10 @@ fn run() -> Result<()> {
       SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
   }
   println!("slightshot: press Ctrl+C here to quit.");
+  // The overlay cannot open without a text engine, and the first one parses the
+  // system font. Start that now so it overlaps with the wait for a hotkey press
+  // instead of landing on the first one.
+  text::warm();
   let event_loop = EventLoop::<hotkey::Trigger>::with_user_event().build()?;
   let proxy = event_loop.create_proxy();
   hotkey::spawn(proxy.clone())?;

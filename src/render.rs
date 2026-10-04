@@ -365,13 +365,6 @@ pub(crate) fn ink_segment(
   dim_region_into(backdrop, canvas, segment.bounds());
 }
 
-pub fn dimmed_copy(frame: &Pixmap) -> Pixmap {
-  let mut out =
-    Pixmap::new(frame.width(), frame.height()).expect("valid frame dimensions");
-  dimmed_into(&mut out, frame);
-  out
-}
-
 fn copy_region(
   dest: &mut Pixmap,
   source: &Pixmap,
@@ -654,12 +647,19 @@ fn draw_tooltip(
 mod tests {
   use super::*;
 
+  fn dimmed(frame: &Pixmap) -> Pixmap {
+    let mut out =
+      Pixmap::new(frame.width(), frame.height()).expect("valid dimensions");
+    dimmed_into(&mut out, frame);
+    out
+  }
+
   #[test]
-  fn dimmed_copy_darkens_rgb_and_keeps_alpha() {
+  fn dimming_darkens_rgb_and_keeps_alpha() {
     let mut pm = Pixmap::new(2, 1).unwrap();
     pm.data_mut()
       .copy_from_slice(&[200, 100, 50, 255, 10, 20, 30, 128]);
-    let dimmed = dimmed_copy(&pm);
+    let dimmed = dimmed(&pm);
     let px = dimmed.data();
     assert_eq!(px[0], ((200 * 150 + 127) / 255) as u8);
     assert_eq!(px[3], 255);
@@ -675,7 +675,7 @@ mod tests {
     let mut dst = Pixmap::new(2, 1).unwrap();
     dst.data_mut().iter_mut().for_each(|b| *b = 77);
     dimmed_into(&mut dst, &src);
-    assert_eq!(dst.data(), dimmed_copy(&src).data());
+    assert_eq!(dst.data(), dimmed(&src).data());
   }
 
   #[test]
@@ -719,7 +719,7 @@ mod tests {
 
     assert_eq!(
       backdrop.data(),
-      dimmed_copy(&canvas).data(),
+      dimmed(&canvas).data(),
       "the segment's bounds should cover every pixel it inked"
     );
   }
@@ -1144,7 +1144,7 @@ mod tests {
     for px in canvas.data_mut().as_chunks_mut::<4>().0 {
       px.copy_from_slice(&[200, 200, 200, 255]);
     }
-    let backdrop = dimmed_copy(&canvas);
+    let backdrop = dimmed(&canvas);
     let bounds = Rect::new(0.0, 0.0, 40.0, 80.0);
     let sel = Rect::new(5.0, 5.0, 30.0, 70.0);
     let selection = Some(sel);

@@ -2,7 +2,6 @@ use core::ffi::c_void;
 use std::{mem, ptr, slice};
 
 use anyhow::{bail, Context, Result};
-use tiny_skia::{IntSize, Pixmap};
 use windows::Win32::{
   Graphics::Gdi::{
     BitBlt, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject,
@@ -116,6 +115,10 @@ impl Bitmap {
     self.screen
   }
 
+  pub fn fits(&self, size: (u32, u32)) -> bool {
+    (self.width, self.height) == size
+  }
+
   pub fn memory_dc(&self) -> HDC {
     self.memory
   }
@@ -133,6 +136,33 @@ impl Bitmap {
 
   fn len(&self) -> usize {
     (self.width as usize) * (self.height as usize) * 4
+  }
+
+  pub fn capture_into(
+    &mut self,
+    desktop: &Desktop,
+    dst: &mut [u8],
+  ) -> Result<()> {
+    let Desktop { origin, size } = *desktop;
+    debug_assert!(self.fits(size), "the section must fit this desktop");
+    // SAFETY: both handles belong to `self`, which outlives the blit, and the
+    // destination is the section mapped for exactly this width by height.
+    unsafe {
+      BitBlt(
+        self.memory_dc(),
+        0,
+        0,
+        size.0 as i32,
+        size.1 as i32,
+        Some(self.screen_dc()),
+        origin.0,
+        origin.1,
+        SRCCOPY | CAPTUREBLT,
+      )
+      .context("BitBlt of the desktop failed")?;
+    }
+    swap_channels(self.pixels(), dst);
+    Ok(())
   }
 }
 
@@ -155,32 +185,4 @@ impl Drop for Bitmap {
       }
     }
   }
-}
-
-pub fn grab(desktop: &Desktop) -> Result<Pixmap> {
-  let Desktop { origin, size } = *desktop;
-  let section = Bitmap::new(size.0, size.1)?;
-  // SAFETY: both handles belong to `section`, which outlives the blit, and the
-  // destination is the section mapped for exactly this width by height.
-  unsafe {
-    BitBlt(
-      section.memory_dc(),
-      0,
-      0,
-      size.0 as i32,
-      size.1 as i32,
-      Some(section.screen_dc()),
-      origin.0,
-      origin.1,
-      SRCCOPY | CAPTUREBLT,
-    )
-    .context("BitBlt of the desktop failed")?;
-  }
-  let mut data = vec![0u8; section.pixels().len()];
-  swap_channels(section.pixels(), &mut data);
-  Pixmap::from_vec(
-    data,
-    IntSize::from_wh(size.0, size.1).context("invalid capture dimensions")?,
-  )
-  .context("zero-sized capture or allocation failed")
 }
