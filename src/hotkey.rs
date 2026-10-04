@@ -48,21 +48,20 @@ impl Key {
 }
 
 pub fn spawn(proxy: EventLoopProxy<Trigger>) -> Result<()> {
-  let (ready, registered) = mpsc::sync_channel::<Result<()>>(1);
+  let (report, reports) = mpsc::sync_channel::<Result<()>>(1);
   thread::Builder::new()
     .name("slightshot-hotkey".to_string())
-    .spawn(move || {
-      let outcome = register();
-      let registered = outcome.is_ok();
-      let _ = ready.send(outcome);
-      if registered {
+    .spawn(move || match register() {
+      Ok(()) => {
+        let _ = report.send(Ok(()));
         watch(proxy);
+      }
+      Err(error) => {
+        let _ = report.send(Err(error));
       }
     })
     .context("spawning the hotkey watcher failed")?;
-  registered
-    .recv()
-    .context("the hotkey watcher stopped early")?
+  reports.recv().context("the hotkey watcher stopped early")?
 }
 
 fn register() -> Result<()> {

@@ -75,9 +75,9 @@ impl Mode {
   }
 
   #[inline(always)]
-  fn typing(&self, label_size: f32) -> Option<(Point, &str, f32)> {
+  fn typing(&self) -> Option<(Point, &str)> {
     match self {
-      Mode::Type(buffer, at) => Some((*at, buffer.as_str(), label_size)),
+      Mode::Type(buffer, at) => Some((*at, buffer.as_str())),
       _ => None,
     }
   }
@@ -168,8 +168,7 @@ struct Session {
   chrome: Chrome,
   modifiers: ModifiersState,
   sizes: [f32; TOOLS.len()],
-  hint: Option<String>,
-  hint_until: Option<Instant>,
+  hint: Option<(String, Instant)>,
   current_cursor: CursorIcon,
 }
 
@@ -187,7 +186,7 @@ impl ApplicationHandler<Trigger> for App {
     };
     if session.expire_hint() {
       session.window.request_redraw();
-    } else if let Some(until) = session.hint_until {
+    } else if let Some((_, until)) = session.hint {
       event_loop.set_control_flow(ControlFlow::WaitUntil(until));
     } else {
       event_loop.set_control_flow(ControlFlow::Wait);
@@ -304,7 +303,9 @@ impl Session {
     let engine = TextEngine::load()?;
     let origin = desktop.origin;
     let canvas = match backdrop {
-      Backdrop::Frozen => capture::grab().context("screen capture failed")?,
+      Backdrop::Frozen => {
+        capture::grab(&desktop).context("screen capture failed")?
+      }
       Backdrop::Live => live_canvas(desktop.size)?,
     };
     let bounds = Rect::new(
@@ -364,7 +365,6 @@ impl Session {
       modifiers: ModifiersState::default(),
       sizes: TOOLS.map(Tool::default_size),
       hint: None,
-      hint_until: None,
       current_cursor: CursorIcon::default(),
     };
     session.window.set_visible(true);
@@ -380,12 +380,10 @@ impl Session {
     }
   }
 
-  /// Clears the hint once its timer elapses. Returns true if it just cleared.
   fn expire_hint(&mut self) -> bool {
-    match self.hint_until {
-      Some(until) if Instant::now() >= until => {
+    match self.hint {
+      Some((_, until)) if Instant::now() >= until => {
         self.hint = None;
-        self.hint_until = None;
         true
       }
       _ => false,
@@ -409,7 +407,10 @@ impl Session {
       None => (&self.backdrop, &self.canvas),
     };
     let draft = self.mode.draft();
-    let typing = self.mode.typing(self.size(Tool::Label));
+    let typing = self
+      .mode
+      .typing()
+      .map(|(at, buffer)| (at, buffer, self.size(Tool::Label)));
     let text = &self.engine;
 
     let frame = &mut self.frame;
@@ -425,7 +426,7 @@ impl Session {
       chrome,
       hotspot: self.hover,
       text,
-      hint: self.hint.as_deref(),
+      hint: self.hint.as_ref().map(|(text, _)| text.as_str()),
     };
 
     render::paint(frame, &scene);
@@ -478,9 +479,9 @@ impl Session {
     match &mut self.mode {
       Mode::Idle => {
         let icon = match (self.tool, self.selection) {
-          (Tool::Select, Some(sel)) => match hit_handle(sel, p, HANDLE_SLOP) {
-            Some(handle) => resize_cursor(handle),
-            None if sel.contains(p) => CursorIcon::Move,
+          (Tool::Select, Some(sel)) => match grab_at(sel, p) {
+            Some(Grab::Resize(handle)) => resize_cursor(handle),
+            Some(Grab::Move) => CursorIcon::Move,
             None => CursorIcon::default(),
           },
           _ => CursorIcon::default(),
@@ -535,12 +536,11 @@ impl Session {
         return self.activate(hotspot);
       }
       if self.tool == Tool::Select {
-        if let Some(handle) = hit_handle(sel, p, HANDLE_SLOP) {
-          self.mode = Mode::Resize(handle, sel);
-          return None;
-        }
-        if sel.contains(p) {
-          self.mode = Mode::Move(p);
+        if let Some(grab) = grab_at(sel, p) {
+          self.mode = match grab {
+            Grab::Resize(handle) => Mode::Resize(handle, sel),
+            Grab::Move => Mode::Move(p),
+          };
           return None;
         }
       }
@@ -767,8 +767,7 @@ impl Session {
     if let Mode::Draw(shape, _) = &mut self.mode {
       shape.set_width(next);
     }
-    self.hint = Some(format_size(next));
-    self.hint_until = Some(Instant::now() + HINT_DURATION);
+    self.hint = Some((format_size(next), Instant::now() + HINT_DURATION));
     self.window.request_redraw();
   }
 }
@@ -889,6 +888,19 @@ fn extend_draft(anchor: Point, draft: &mut Shape, p: Point) -> Option<Step> {
       Some(Step::Repaint)
     }
   }
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Grab {
+  Resize(Handle),
+  Move,
+}
+
+fn grab_at(sel: Rect, p: Point) -> Option<Grab> {
+  if let Some(handle) = hit_handle(sel, p, HANDLE_SLOP) {
+    return Some(Grab::Resize(handle));
+  }
+  sel.contains(p).then_some(Grab::Move)
 }
 
 fn resize_cursor(handle: Handle) -> CursorIcon {
@@ -1110,6 +1122,21 @@ mod tests {
     for (handle, expected) in cases {
       assert_eq!(resize_cursor(handle), expected);
     }
+  }
+
+  #[test]
+  fn a_handle_wins_over_the_interior_it_overlaps() {
+    // The cursor under a point and the press that follows it both ask
+    // `grab_at`, so a point that sits inside the region but within reach of a
+    // handle has to come back as the same answer for both.
+    let sel = Rect::new(100.0, 100.0, 100.0, 100.0);
+    assert_eq!(grab_at(sel, Point::new(150.0, 150.0)), Some(Grab::Move));
+    assert_eq!(
+      grab_at(sel, Point::new(100.0, 150.0)),
+      Some(Grab::Resize(Handle::Left)),
+      "a handle grabs the interior it overlaps"
+    );
+    assert_eq!(grab_at(sel, Point::new(90.0, 150.0)), None);
   }
 
   #[test]

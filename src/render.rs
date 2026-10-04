@@ -13,6 +13,9 @@ const DIM_ALPHA: u8 = 105;
 const BUTTON: f32 = 30.0;
 const TOOL_GAP: f32 = 2.0;
 const PANEL_PAD: f32 = 5.0;
+const COLUMN_GAP: f32 = 6.0;
+const ROW_GAP: f32 = 8.0;
+const SCREEN_MARGIN: f32 = 4.0;
 const BADGE_TEXT: f32 = 18.0;
 const BADGE_GAP: f32 = 5.0;
 const ICON_BOX: f32 = 18.0;
@@ -52,7 +55,6 @@ impl Command {
     }
   }
 
-  /// Whether a button carrying this command accepts a click right now.
   fn enabled(self, ready: bool, can_undo: bool) -> bool {
     match self {
       Command::Tool(_) | Command::NextColor | Command::Close => true,
@@ -122,9 +124,7 @@ impl Chrome {
       actions: ACTION_BUTTONS.to_vec(),
     }
   }
-}
 
-impl Chrome {
   fn hovered(&self, hotspot: Option<Hotspot>) -> Option<(&Button, Side)> {
     match hotspot {
       Some(Hotspot::Tool(i)) => self.tools.get(i).map(|b| (b, Side::Left)),
@@ -207,31 +207,31 @@ fn layout_panel(buttons: &mut [Button], sel: Rect, bounds: Rect, panel: Panel) {
 
   let (x, y) = match panel {
     Panel::Column { live } => {
-      let mut x = sel.right() + 6.0;
+      let mut x = sel.right() + COLUMN_GAP;
       if x + width > bounds.right() {
-        x = sel.right() - width - 6.0;
+        x = sel.right() - width - COLUMN_GAP;
       }
       x = clamp_span(x, width, bounds.x, bounds.right());
       let y = if live {
         clamp_span(
           sel.center().y - height * 0.5,
           height,
-          bounds.y + 4.0,
-          bounds.bottom() - 4.0,
+          bounds.y + SCREEN_MARGIN,
+          bounds.bottom() - SCREEN_MARGIN,
         )
       } else {
         (sel.bottom() - height).clamp(
-          bounds.y + 4.0,
-          (bounds.bottom() - height - 4.0).max(bounds.y),
+          bounds.y + SCREEN_MARGIN,
+          (bounds.bottom() - height - SCREEN_MARGIN).max(bounds.y),
         )
       };
       (x, y)
     }
     Panel::Row => {
       let x = (sel.right() - width).max(bounds.x);
-      let mut y = sel.bottom() + 8.0;
+      let mut y = sel.bottom() + ROW_GAP;
       if y + height > bounds.bottom() {
-        y = sel.y - height - 8.0;
+        y = sel.y - height - ROW_GAP;
       }
       let y = clamp_span(y, height, bounds.y, bounds.bottom());
       (x, y)
@@ -423,10 +423,6 @@ fn draw_live(pm: &mut Pixmap, scene: &Scene) {
   }
 }
 
-/// The pixel rectangle covering `sel`, clipped to a `px_w` by `px_h` image.
-/// Every edge is clipped, because a drag can start or end outside the image. A
-/// selection that falls outside reports a zero width or height. `f32 as u32`
-/// saturates, so negative and NaN edges land on zero.
 #[inline(always)]
 fn region_pixels(sel: Rect, px_w: u32, px_h: u32) -> (u32, u32, u32, u32) {
   let x0 = (sel.x.floor() as u32).min(px_w);
@@ -436,8 +432,6 @@ fn region_pixels(sel: Rect, px_w: u32, px_h: u32) -> (u32, u32, u32, u32) {
   (x0, y0, width, height)
 }
 
-/// Crops `sel` out of `frame`. Annotations are expected to be already inked
-/// into `frame`, which is what the overlay does before delivering a shot.
 pub fn flatten(frame: &Pixmap, sel: Rect) -> Shot {
   let (x0, y0, width, height) =
     region_pixels(sel, frame.width(), frame.height());

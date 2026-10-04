@@ -157,8 +157,8 @@ impl Drop for Bitmap {
   }
 }
 
-pub fn grab() -> Result<Pixmap> {
-  let Desktop { origin, size } = desktop()?;
+pub fn grab(desktop: &Desktop) -> Result<Pixmap> {
+  let Desktop { origin, size } = *desktop;
   let section = Bitmap::new(size.0, size.1)?;
   // SAFETY: both handles belong to `section`, which outlives the blit, and the
   // destination is the section mapped for exactly this width by height.

@@ -144,7 +144,6 @@ pub fn handle_anchor(rect: Rect, handle: Handle) -> Point {
   Point::new(x, y)
 }
 
-/// How close the cursor has to be to a handle to grab it.
 pub const HANDLE_SLOP: f32 = 7.0;
 
 #[inline]
@@ -200,8 +199,6 @@ mod tests {
 
   #[test]
   fn hit_handle_returns_the_first_anchor_within_the_slop() {
-    /// Every anchor, in order, with no early exit of any kind. This is the
-    /// whole contract: the first handle within `slop`, or nothing.
     fn scan(rect: Rect, p: Point, slop: f32) -> Option<Handle> {
       HANDLES
         .into_iter()
