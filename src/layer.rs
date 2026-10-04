@@ -9,7 +9,7 @@ use windows::Win32::{
   },
 };
 
-use crate::{capture::Bitmap, pixel::swap_channels_keeping_alpha};
+use crate::{capture::Bitmap, geom::Rect, pixel::swap_channels_region};
 
 pub struct Layered {
   window: HWND,
@@ -44,7 +44,7 @@ impl Layered {
     })
   }
 
-  pub fn present(&mut self, frame: &Pixmap) -> Result<()> {
+  pub fn present(&mut self, frame: &Pixmap, area: Rect) -> Result<()> {
     if frame.width() != self.size.cx as u32
       || frame.height() != self.size.cy as u32
     {
@@ -56,6 +56,9 @@ impl Layered {
         self.size.cy
       );
     }
+    if area.is_empty() {
+      return Ok(());
+    }
     self.ensure_layered()?;
     // tiny-skia keeps premultiplied RGBA, which is what a 32-bit layered
     // window wants once red and blue are the right way round.
@@ -66,10 +69,21 @@ impl Layered {
       AlphaFormat: AC_SRC_ALPHA as u8,
     };
     let source = POINT::default();
-    swap_channels_keeping_alpha(frame.data(), self.surface.pixels_mut());
-    // SAFETY: the section has just been filled with a frame of exactly this
-    // size, and the handles and positions passed here belong to this struct and
-    // to the window it outlives.
+    let area = area.clamped_inside(Rect::new(
+      0.0,
+      0.0,
+      frame.width() as f32,
+      frame.height() as f32,
+    ));
+    swap_channels_region::<true>(
+      frame.data(),
+      frame.width(),
+      self.surface.pixels_mut(),
+      area,
+    );
+    // SAFETY: the section holds a frame of exactly this size, with `area` just
+    // written over it, and the handles and positions passed here belong to this
+    // struct and to the window it outlives.
     unsafe {
       UpdateLayeredWindow(
         self.window,

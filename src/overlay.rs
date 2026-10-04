@@ -8,7 +8,9 @@ use std::{
 };
 
 use anyhow::{anyhow, bail, Context, Result};
-use softbuffer::{Context as SoftContext, Surface as SoftSurface};
+use softbuffer::{
+  Context as SoftContext, Rect as Damage, Surface as SoftSurface,
+};
 use tiny_skia::{Color, Pixmap};
 use windows::{
   core::BOOL,
@@ -39,8 +41,8 @@ use crate::{
   geom::{hit_handle, resized, Handle, Point, Rect, HANDLE_SLOP},
   hotkey::Trigger,
   layer::Layered,
-  pixel::swap_channels_to_words,
-  render::{self, Backdrop, Chrome, Hotspot, Scene},
+  pixel::swap_words_region,
+  render::{self, Backdrop, Chrome, Hotspot, Scene, Shown},
   text::TextEngine,
 };
 
@@ -151,7 +153,10 @@ enum Presenter {
 }
 
 impl Presenter {
-  fn present(&mut self, frame: &Pixmap) -> Result<()> {
+  fn present(&mut self, frame: &Pixmap, area: Rect) -> Result<()> {
+    if area.is_empty() {
+      return Ok(());
+    }
     match self {
       Presenter::Solid(surface) => {
         let Ok(mut buffer) = surface.buffer_mut() else {
@@ -160,15 +165,29 @@ impl Presenter {
         if buffer.len() != (frame.width() * frame.height()) as usize {
           return Ok(());
         }
-        swap_channels_to_words(frame.data(), &mut buffer);
-        let _ = buffer.present();
+        swap_words_region(frame.data(), frame.width(), &mut buffer, area);
+        let damage = [damage_of(area)];
+        let _ = buffer.present_with_damage(&damage);
         Ok(())
       }
       // A layered window that cannot be composited stays on the screen as an
       // invisible sheet that still swallows the pointer, so this one is worth
       // reporting instead of dropping.
-      Presenter::Live(layer) => layer.present(frame),
+      Presenter::Live(layer) => layer.present(frame, area),
     }
+  }
+}
+
+fn damage_of(area: Rect) -> Damage {
+  let x = area.x.floor().max(0.0) as u32;
+  let y = area.y.floor().max(0.0) as u32;
+  let width = (area.w.ceil() as u32).max(1);
+  let height = (area.h.ceil() as u32).max(1);
+  Damage {
+    x,
+    y,
+    width: NonZeroU32::new(width).unwrap_or(NonZeroU32::MIN),
+    height: NonZeroU32::new(height).unwrap_or(NonZeroU32::MIN),
   }
 }
 
@@ -193,6 +212,8 @@ struct Session {
   sizes: [f32; TOOLS.len()],
   hint: Option<(String, Instant)>,
   current_cursor: CursorIcon,
+  painted: Rect,
+  shown: Option<Shown>,
 }
 
 #[derive(Default)]
@@ -419,6 +440,8 @@ impl Session {
       sizes: TOOLS.map(Tool::default_size),
       hint: None,
       current_cursor: CursorIcon::default(),
+      painted: bounds,
+      shown: None,
     };
     session.window.set_visible(true);
     session.render()?;
@@ -469,24 +492,50 @@ impl Session {
     } = &mut self.buffers;
     let canvas = canvas.at();
     let backdrop = backdrop.at();
-    render::paint(
-      frame.at(),
-      &Scene {
-        backdrop,
-        canvas,
-        bounds: self.bounds,
-        selection: self.selection,
-        kind: self.backdrop_kind,
-        draft,
-        typing,
-        palette_index: self.palette_index,
-        chrome: &self.chrome,
-        hotspot: self.hover,
-        text: &self.engine,
-        hint,
-      },
-    );
-    self.presenter.present(frame.at())
+    let frame = frame.at();
+    let scene = Scene {
+      backdrop,
+      canvas,
+      bounds: self.bounds,
+      selection: self.selection,
+      kind: self.backdrop_kind,
+      draft,
+      typing,
+      palette_index: self.palette_index,
+      chrome: &self.chrome,
+      hotspot: self.hover,
+      text: &self.engine,
+      hint,
+    };
+    // A frame only has to be redrawn where the picture or the chrome above it
+    // moved since the last one, and the rest of the buffer still holds what
+    // that frame drew. The box is in frame pixels, which is also what the
+    // presenter writes from.
+    let shown = Shown::capture(&scene);
+    let moved = match &self.shown {
+      Some(previous) => {
+        previous.settled_from(&shown, self.bounds, &self.engine)
+      }
+      None => Rect::ZERO,
+    };
+    let pixels =
+      Rect::new(0.0, 0.0, frame.width() as f32, frame.height() as f32);
+    let area = self.painted.union(moved).clamped_inside(pixels);
+    self.shown = Some(shown);
+    self.painted = Rect::ZERO;
+    if area.is_empty() {
+      // Nothing of ours moved, but the system can still be asking because the
+      // window was covered and uncovered. The frame holds the whole picture, so
+      // hand it over again rather than leave what was on top showing through.
+      return self.presenter.present(frame, pixels);
+    }
+    render::paint(frame, &scene, area);
+    self.presenter.present(frame, area)
+  }
+
+  fn repainted(&mut self, area: Rect) {
+    self.painted = self.painted.union(area);
+    self.window.request_redraw();
   }
 
   fn mouse_move(&mut self, position: PhysicalPosition<f64>) {
@@ -702,20 +751,24 @@ impl Session {
 
   fn ink_shape(&mut self, shape: &Shape) {
     self.snapshot();
+    let area = render::shape_area(Some(shape), &self.engine);
     let Screen {
       canvas, backdrop, ..
     } = &mut self.buffers;
     let canvas = canvas.at();
     render::ink(canvas, shape, &self.engine);
     render::dimmed_into(backdrop.at(), canvas);
+    self.repainted(area);
   }
 
   fn ink_segment(&mut self, segment: Segment) {
     self.snapshot();
+    let area = segment.bounds();
     let Screen {
       canvas, backdrop, ..
     } = &mut self.buffers;
     render::ink_segment(canvas.at(), backdrop.at(), segment);
+    self.repainted(area);
   }
 
   fn replay(&mut self) {
@@ -733,6 +786,9 @@ impl Session {
       render::ink(canvas, shape, &self.engine);
     }
     render::dimmed_into(backdrop.at(), canvas);
+    // Undo takes the whole picture back to an earlier state, so the frame has to
+    // be rebuilt from the top.
+    self.repainted(self.bounds);
   }
 
   fn mouse_up(&mut self) {

@@ -104,6 +104,45 @@ impl Rect {
       && self.y <= p.y
       && p.y <= self.bottom()
   }
+
+  #[inline(always)]
+  pub fn is_empty(self) -> bool {
+    self.w <= 0.0 || self.h <= 0.0
+  }
+
+  pub fn union(self, other: Rect) -> Rect {
+    if other.is_empty() {
+      return self;
+    }
+    if self.is_empty() {
+      return other;
+    }
+    let x = self.x.min(other.x);
+    let y = self.y.min(other.y);
+    let right = self.right().max(other.right());
+    let bottom = self.bottom().max(other.bottom());
+    Rect::new(x, y, right - x, bottom - y)
+  }
+
+  #[inline(always)]
+  pub fn overlaps(self, other: Rect) -> bool {
+    !self.is_empty()
+      && !other.is_empty()
+      && self.x < other.right()
+      && other.x < self.right()
+      && self.y < other.bottom()
+      && other.y < self.bottom()
+  }
+
+  #[inline(always)]
+  pub fn contains_rect(self, other: Rect) -> bool {
+    !other.is_empty()
+      && !self.is_empty()
+      && self.x <= other.x
+      && other.right() <= self.right()
+      && self.y <= other.y
+      && other.bottom() <= self.bottom()
+  }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -259,5 +298,35 @@ mod tests {
   fn clamp_span_keeps_the_span_on_screen() {
     assert_eq!(clamp_span(2300.0, 300.0, 0.0, 1920.0), 1620.0);
     assert_eq!(clamp_span(-50.0, 300.0, 0.0, 1920.0), 0.0);
+  }
+
+  #[test]
+  fn union_ignores_a_rect_with_no_area() {
+    // `Rect::ZERO` is how the chrome says "no button here", so joining it in
+    // must not stretch the result down to the origin.
+    let area = Rect::new(100.0, 200.0, 30.0, 40.0);
+    assert_eq!(area.union(Rect::ZERO), area);
+    assert_eq!(Rect::ZERO.union(area), area);
+    assert_eq!(Rect::ZERO.union(Rect::ZERO), Rect::ZERO);
+    assert_eq!(
+      area.union(Rect::new(90.0, 210.0, 30.0, 40.0)),
+      Rect::new(90.0, 200.0, 40.0, 50.0)
+    );
+  }
+
+  #[test]
+  fn overlaps_touches_neither_its_edge_nor_an_empty_rect() {
+    let area = Rect::new(10.0, 10.0, 20.0, 20.0);
+    assert!(area.overlaps(Rect::new(25.0, 25.0, 10.0, 10.0)));
+    assert!(
+      !area.overlaps(Rect::new(30.0, 10.0, 10.0, 10.0)),
+      "edge to edge"
+    );
+    assert!(!area.overlaps(Rect::ZERO), "an empty rect is nowhere");
+    assert!(!Rect::ZERO.overlaps(area));
+    assert!(area.contains_rect(Rect::new(12.0, 12.0, 4.0, 4.0)));
+    assert!(area.contains_rect(area));
+    assert!(!area.contains_rect(Rect::new(9.0, 10.0, 4.0, 4.0)));
+    assert!(!area.contains_rect(Rect::ZERO));
   }
 }

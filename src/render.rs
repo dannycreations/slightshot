@@ -4,7 +4,7 @@ use crate::{
   action::{Deliverable, Shot},
   annotate::{active_color, stroke_alpha, History, Segment, Shape, Tool},
   draw,
-  geom::{clamp_span, handle_anchor, Point, Rect, HANDLES},
+  geom::{clamp_span, handle_anchor, Handle, Point, Rect, HANDLES},
   text::TextEngine,
 };
 
@@ -18,6 +18,9 @@ const ROW_GAP: f32 = 8.0;
 const SCREEN_MARGIN: f32 = 4.0;
 const BADGE_TEXT: f32 = 18.0;
 const BADGE_GAP: f32 = 5.0;
+const BADGE_PAD: f32 = 6.0;
+const BADGE_H: f32 = BADGE_TEXT + 7.0;
+const EDGE: f32 = 3.0;
 const ICON_BOX: f32 = 18.0;
 const TOOLTIP_TEXT: f32 = 14.0;
 const TOOLTIP_PAD: f32 = 5.0;
@@ -64,7 +67,7 @@ impl Command {
   }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Button {
   pub command: Command,
   pub icon: draw::Icon,
@@ -107,7 +110,7 @@ const ACTION_BUTTONS: [Button; 4] = [
   button(Command::Close, draw::Icon::Close),
 ];
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Chrome {
   pub tools: Vec<Button>,
   pub actions: Vec<Button>,
@@ -258,38 +261,292 @@ pub struct Scene<'a> {
   pub hint: Option<&'a str>,
 }
 
-pub fn paint(pm: &mut Pixmap, scene: &Scene) {
-  pm.data_mut().copy_from_slice(scene.backdrop.data());
-  let Some(sel) = scene.selection else {
-    draw_live(pm, scene);
-    return;
-  };
-  let (x0, y0, width, height) = region_pixels(sel, pm.width(), pm.height());
+#[derive(Debug, PartialEq)]
+pub struct Shown {
+  selection: Option<Rect>,
+  chrome: Chrome,
+  hotspot: Option<Hotspot>,
+  hint: Option<String>,
+  palette: usize,
+  draft: Option<Shape>,
+  typing: Option<(Point, String, f32)>,
+}
+
+impl Shown {
+  pub fn capture(scene: &Scene) -> Self {
+    Self {
+      selection: scene.selection,
+      chrome: scene.chrome.clone(),
+      hotspot: scene.hotspot,
+      hint: scene.hint.map(str::to_string),
+      palette: scene.palette_index,
+      draft: scene.draft.cloned(),
+      typing: scene
+        .typing
+        .map(|(at, buffer, size)| (at, buffer.to_string(), size)),
+    }
+  }
+
+  pub fn settled_from(
+    &self,
+    next: &Shown,
+    bounds: Rect,
+    engine: &TextEngine,
+  ) -> Rect {
+    let mut area = Rect::ZERO;
+    if self.selection != next.selection {
+      area = area.union(region_area(self.selection, bounds, engine));
+      area = area.union(region_area(next.selection, bounds, engine));
+    }
+    if self.chrome != next.chrome
+      || self.hotspot != next.hotspot
+      || self.hint != next.hint
+    {
+      area = area.union(self.panels_area(bounds, engine));
+      area = area.union(next.panels_area(bounds, engine));
+    }
+    if self.draft != next.draft {
+      area = area.union(shape_area(self.draft.as_ref(), engine));
+      area = area.union(shape_area(next.draft.as_ref(), engine));
+    }
+    if self.typing != next.typing {
+      area = area.union(typed_area(self.typed(), engine));
+      area = area.union(typed_area(next.typed(), engine));
+    }
+    if self.palette != next.palette {
+      // The swatch on the colour button and the text being typed are the only
+      // two things that take the active colour.
+      area = area.union(self.panels_area(bounds, engine));
+      area = area.union(next.panels_area(bounds, engine));
+      area = area.union(typed_area(self.typed(), engine));
+      area = area.union(typed_area(next.typed(), engine));
+    }
+    area
+  }
+
+  fn panels_area(&self, bounds: Rect, engine: &TextEngine) -> Rect {
+    panels_area(
+      &self.chrome,
+      self.hotspot,
+      self.hint.as_deref(),
+      bounds,
+      engine,
+    )
+  }
+
+  fn typed(&self) -> Option<(Point, &str, f32)> {
+    self
+      .typing
+      .as_ref()
+      .map(|(at, buffer, size)| (*at, buffer.as_str(), *size))
+  }
+}
+
+fn region_area(sel: Option<Rect>, bounds: Rect, engine: &TextEngine) -> Rect {
+  match sel {
+    Some(sel) => sel
+      .union(bounding(&outline_boxes(sel)))
+      .union(bounding(&handle_boxes(sel)))
+      .union(badge_rect(sel, bounds, engine).inflated(EDGE)),
+    None => Rect::ZERO,
+  }
+}
+
+fn outline_boxes(sel: Rect) -> [Rect; 4] {
+  let edge = sel.inflated(EDGE);
+  [
+    Rect::new(edge.x, edge.y, edge.w, EDGE),
+    Rect::new(edge.x, edge.bottom() - EDGE, edge.w, EDGE),
+    Rect::new(edge.x, edge.y, EDGE, edge.h),
+    Rect::new(edge.right() - EDGE, edge.y, EDGE, edge.h),
+  ]
+}
+
+fn handle_boxes(sel: Rect) -> [Rect; 8] {
+  HANDLES.map(|handle| handle_square(sel, handle).inflated(EDGE))
+}
+
+fn panels_area(
+  chrome: &Chrome,
+  hotspot: Option<Hotspot>,
+  hint: Option<&str>,
+  bounds: Rect,
+  engine: &TextEngine,
+) -> Rect {
+  let mut area = Rect::ZERO;
+  for button in chrome.tools.iter().chain(&chrome.actions) {
+    area = area.union(button.area.inflated(EDGE));
+  }
+  if let Some((button, side)) = chrome.hovered(hotspot) {
+    area = area.union(tooltip_rect(
+      button.area,
+      button.command.label(),
+      bounds,
+      engine,
+      side,
+    ));
+  }
+  if let Some(hint) = hint {
+    if let Some(button) = chrome.tools.iter().find(|b| b.active) {
+      area =
+        area.union(tooltip_rect(button.area, hint, bounds, engine, Side::Left));
+    }
+  }
+  area
+}
+
+pub fn shape_area(shape: Option<&Shape>, engine: &TextEngine) -> Rect {
+  match shape {
+    Some(Shape::Stroke { points, width, .. }) => {
+      let (first, last) = (
+        points.first().copied().unwrap_or_default(),
+        points.last().copied().unwrap_or_default(),
+      );
+      let corners =
+        points
+          .iter()
+          .fold(Rect::spanning(first, last), |area, point| {
+            Rect::spanning(
+              Point::new(area.x.min(point.x), area.y.min(point.y)),
+              Point::new(area.right().max(point.x), area.bottom().max(point.y)),
+            )
+          });
+      corners.inflated(width * 0.5 + 1.0)
+    }
+    Some(Shape::Line {
+      from, to, width, ..
+    }) => Rect::spanning(*from, *to).inflated(width * 0.5 + 1.0),
+    Some(Shape::Outline { rect, width, .. }) => {
+      rect.inflated(width * 0.5 + 1.0)
+    }
+    Some(Shape::Caption { at, text, size, .. }) => {
+      engine.inked(text, *at, *size)
+    }
+    None => Rect::ZERO,
+  }
+}
+
+fn typed_area(typing: Option<(Point, &str, f32)>, engine: &TextEngine) -> Rect {
+  match typing {
+    Some((at, buffer, size)) => {
+      let caret = at.x + engine.width(buffer, size);
+      engine.inked(buffer, at, size).union(Rect::new(
+        caret,
+        at.y,
+        2.0,
+        size + 2.0,
+      ))
+    }
+    None => Rect::ZERO,
+  }
+}
+
+fn touches(piece: &[Rect], area: Rect) -> bool {
+  piece.iter().any(|part| part.overlaps(area))
+}
+
+fn bounding(piece: &[Rect]) -> Rect {
+  piece
+    .iter()
+    .fold(Rect::ZERO, |area, part| area.union(*part))
+}
+
+fn inside(piece: &[Rect], area: Rect) -> bool {
+  piece.iter().all(|part| area.contains_rect(*part))
+}
+
+pub fn paint(pm: &mut Pixmap, scene: &Scene, damage: Rect) {
+  let engine = scene.text;
+  let region = scene
+    .kind
+    .picks_region()
+    .then_some(scene.selection)
+    .flatten();
+  let outline = region.map(outline_boxes).unwrap_or([Rect::ZERO; 4]);
+  let handles = region.map(handle_boxes).unwrap_or([Rect::ZERO; 8]);
+  let badge = [region
+    .map(|sel| badge_rect(sel, scene.bounds, engine).inflated(EDGE))
+    .unwrap_or(Rect::ZERO)];
+  let draft = [shape_area(scene.draft, engine)];
+  let typing = [typed_area(scene.typing, engine)];
+  let panels = [panels_area(
+    scene.chrome,
+    scene.hotspot,
+    scene.hint,
+    scene.bounds,
+    engine,
+  )];
+
+  let mut area = damage;
+  for piece in [
+    &outline[..],
+    &handles[..],
+    &badge[..],
+    &draft[..],
+    &typing[..],
+    &panels[..],
+  ] {
+    if touches(piece, area) {
+      area = area.union(bounding(piece));
+    }
+  }
+
+  let (x0, y0, width, height) = region_pixels(area, pm.width(), pm.height());
   if width == 0 || height == 0 {
     return;
   }
   let at = (x0, y0);
-  copy_region(pm, scene.canvas, at, at, (width, height));
-  draw_live(pm, scene);
-  // An area the user picked can be adjusted, so it gets the outline and the
-  // handles that say so. A live overlay's area is the window itself and cannot
-  // be adjusted, so those would only promise something that is not there.
-  if scene.kind.picks_region() {
-    draw::dashed_rect(pm, sel, [255, 255, 255]);
-    draw_handles(pm, sel);
-    draw_badge(pm, sel, scene.bounds, scene.text);
+  copy_region(pm, scene.backdrop, at, at, (width, height));
+  if let Some(sel) = scene.selection {
+    let (sx, sy, sw, sh) = region_pixels(sel, pm.width(), pm.height());
+    let left = x0.max(sx);
+    let top = y0.max(sy);
+    let right = (x0 + width).min(sx + sw);
+    let bottom = (y0 + height).min(sy + sh);
+    if right > left && bottom > top {
+      let inner = (left, top);
+      copy_region(pm, scene.canvas, inner, inner, (right - left, bottom - top));
+    }
   }
-  if let Some((at, buffer, size)) = scene.typing {
-    let caret_x = at.x + scene.text.width(buffer, size);
-    draw::polyline(
-      pm,
-      &[Point::new(caret_x, at.y), Point::new(caret_x, at.y + size)],
-      [255, 255, 255],
-      1.5,
-      255,
-    );
+  if let Some(sel) = region {
+    if inside(&outline, area) {
+      draw::dashed_rect(pm, sel, [255, 255, 255]);
+    }
+    if inside(&handles, area) {
+      draw_handles(pm, sel);
+    }
+    if inside(&badge, area) {
+      draw_badge(pm, sel, scene.bounds, engine);
+    }
   }
-  draw_panels(pm, scene);
+  if inside(&draft, area) {
+    if let Some(shape) = scene.draft {
+      ink(pm, shape, engine);
+    }
+  }
+  if inside(&typing, area) {
+    if let Some((at, buffer, size)) = scene.typing {
+      engine.draw(
+        pm,
+        buffer,
+        at.x,
+        at.y,
+        size,
+        active_color(scene.palette_index),
+      );
+      let caret_x = at.x + engine.width(buffer, size);
+      draw::polyline(
+        pm,
+        &[Point::new(caret_x, at.y), Point::new(caret_x, at.y + size)],
+        [255, 255, 255],
+        1.5,
+        255,
+      );
+    }
+  }
+  if inside(&panels, area) {
+    draw_panels(pm, scene);
+  }
 }
 
 const DIM_LUT: [u8; 256] = {
@@ -400,16 +657,6 @@ fn copy_region(
   }
 }
 
-fn draw_live(pm: &mut Pixmap, scene: &Scene) {
-  if let Some(draft) = scene.draft {
-    ink(pm, draft, scene.text);
-  }
-  if let Some((at, buffer, size)) = scene.typing {
-    let color = active_color(scene.palette_index);
-    scene.text.draw(pm, buffer, at.x, at.y, size, color);
-  }
-}
-
 #[inline(always)]
 fn region_pixels(sel: Rect, px_w: u32, px_h: u32) -> (u32, u32, u32, u32) {
   let x0 = (sel.x.floor() as u32).min(px_w);
@@ -489,36 +736,41 @@ fn arrow_base(from: Point, to: Point, head_size: f32) -> Point {
 
 fn draw_handles(pm: &mut Pixmap, sel: Rect) {
   for &handle in &HANDLES {
-    let anchor = handle_anchor(sel, handle);
-    let square = Rect::new(anchor.x - 3.0, anchor.y - 3.0, 6.0, 6.0);
+    let square = handle_square(sel, handle);
     draw::rect_fill(pm, square, [255, 255, 255], 255);
     draw::rect_stroke(pm, square, [20, 20, 20], 1.0, 255);
   }
 }
 
-fn draw_badge(pm: &mut Pixmap, sel: Rect, bounds: Rect, engine: &TextEngine) {
+fn handle_square(sel: Rect, handle: Handle) -> Rect {
+  let anchor = handle_anchor(sel, handle);
+  Rect::new(anchor.x - 3.0, anchor.y - 3.0, 6.0, 6.0)
+}
+
+fn badge_rect(sel: Rect, bounds: Rect, engine: &TextEngine) -> Rect {
   let label = format!("{}x{}", sel.w.round() as i64, sel.h.round() as i64);
-
-  let text_width = engine.width(&label, BADGE_TEXT);
-  let pad = 6.0;
-  let box_w = text_width + pad * 2.0;
-  let box_h = BADGE_TEXT + 7.0;
-
+  let box_w = engine.width(&label, BADGE_TEXT) + BADGE_PAD * 2.0;
   let mut bx = sel.x;
-  let mut by = sel.y - box_h - BADGE_GAP;
+  let mut by = sel.y - BADGE_H - BADGE_GAP;
   if by < bounds.y {
     by = sel.y + BADGE_GAP;
   }
   bx = clamp_span(bx, box_w, bounds.x, bounds.right());
+  Rect::new(bx, by, box_w, BADGE_H)
+}
 
-  draw::rounded_fill(
+fn draw_badge(pm: &mut Pixmap, sel: Rect, bounds: Rect, engine: &TextEngine) {
+  let label = format!("{}x{}", sel.w.round() as i64, sel.h.round() as i64);
+  let plate = badge_rect(sel, bounds, engine);
+  draw::rounded_fill(pm, plate, 4.0, [10, 10, 10], 210);
+  engine.draw(
     pm,
-    Rect::new(bx, by, box_w, box_h),
-    4.0,
-    [10, 10, 10],
-    210,
+    &label,
+    plate.x + BADGE_PAD,
+    plate.y + 3.5,
+    BADGE_TEXT,
+    [255, 255, 255],
   );
-  engine.draw(pm, &label, bx + pad, by + 3.5, BADGE_TEXT, [255, 255, 255]);
 }
 
 fn draw_panels(pm: &mut Pixmap, scene: &Scene) {
@@ -1185,13 +1437,305 @@ mod tests {
       hint: None,
     };
 
-    paint(&mut pm, &scene);
+    paint(&mut pm, &scene, bounds);
 
     let idx = (70 * 40 + 30) * 4;
     let px = &pm.data()[idx..idx + 4];
     assert!(
       px[0] > 150 && px[2] < 100,
       "draft should appear at (30, 70), got {px:?}"
+    );
+  }
+
+  fn scene_of<'a>(
+    size: (u32, u32),
+    canvas: &'a Pixmap,
+    backdrop: &'a Pixmap,
+    chrome: &'a Chrome,
+    engine: &'a TextEngine,
+    selection: Option<Rect>,
+  ) -> Scene<'a> {
+    Scene {
+      backdrop,
+      canvas,
+      bounds: Rect::new(0.0, 0.0, size.0 as f32, size.1 as f32),
+      selection,
+      kind: Backdrop::Frozen,
+      draft: None,
+      typing: None,
+      palette_index: 0,
+      chrome,
+      hotspot: None,
+      text: engine,
+      hint: None,
+    }
+  }
+
+  #[test]
+  fn a_frame_painted_in_pieces_is_the_frame_a_whole_paint_makes() {
+    // A session repaints one box at a time, so tiling the screen has to land on
+    // exactly the frame a single paint would have made. Anything the clipped
+    // paint gets wrong about what belongs where shows up as a seam.
+    let Ok(engine) = TextEngine::load() else {
+      return;
+    };
+    let bounds = Rect::new(0.0, 0.0, 400.0, 400.0);
+    let sel = Rect::new(30.0, 30.0, 300.0, 200.0);
+    let (canvas, backdrop, chrome) = busy_scene(sel, bounds);
+    let mut scene =
+      scene_of((400, 400), &canvas, &backdrop, &chrome, &engine, Some(sel));
+    scene.hotspot = Some(Hotspot::Action(2));
+
+    let mut whole = Pixmap::new(400, 400).unwrap();
+    paint(&mut whole, &scene, bounds);
+
+    let mut tiled = Pixmap::new(400, 400).unwrap();
+    let tile = Rect::new(0.0, 0.0, 133.0, 117.0);
+    for row in 0..4 {
+      for column in 0..4 {
+        paint(
+          &mut tiled,
+          &scene,
+          Rect::new(
+            tile.x + tile.w * column as f32,
+            tile.y + tile.h * row as f32,
+            tile.w,
+            tile.h,
+          ),
+        );
+      }
+    }
+    if first_difference(tiled.data(), whole.data()).is_some() {
+      for y in 0..6 {
+        let mut line = String::new();
+        for x in 26..40 {
+          let i = (y * 400 + x) * 4;
+          line.push_str(&format!(
+            "{:>3},{:>3},{:>3}|",
+            tiled.data()[i],
+            tiled.data()[i + 1],
+            tiled.data()[i + 2]
+          ));
+        }
+        eprintln!("tiled y={y} {line}");
+        let mut line = String::new();
+        for x in 26..40 {
+          let i = (y * 400 + x) * 4;
+          line.push_str(&format!(
+            "{:>3},{:>3},{:>3}|",
+            whole.data()[i],
+            whole.data()[i + 1],
+            whole.data()[i + 2]
+          ));
+        }
+        eprintln!("whole y={y} {line}");
+      }
+    }
+    assert_eq!(
+      first_difference(tiled.data(), whole.data()),
+      None,
+      "painting the screen in tiles has to land on the same frame"
+    );
+  }
+
+  #[test]
+  fn a_damaged_frame_leaves_the_rest_of_the_buffer_alone() {
+    let Ok(engine) = TextEngine::load() else {
+      return;
+    };
+    let bounds = Rect::new(0.0, 0.0, 400.0, 400.0);
+    let sel = Rect::new(30.0, 30.0, 300.0, 200.0);
+    let (canvas, backdrop, chrome) = busy_scene(sel, bounds);
+    let scene =
+      scene_of((400, 400), &canvas, &backdrop, &chrome, &engine, Some(sel));
+
+    // A frame holding what the last frame drew, repainted over one box: only
+    // that box may change, because the pixels around it are already right.
+    let mut frame = Pixmap::new(400, 400).unwrap();
+    paint(&mut frame, &scene, bounds);
+    let before = frame.clone();
+    paint(&mut frame, &scene, Rect::new(100.0, 100.0, 40.0, 40.0));
+
+    assert_eq!(
+      first_difference(frame.data(), before.data()),
+      None,
+      "repainting the same scene over a box of it must change nothing"
+    );
+  }
+
+  fn busy_scene(sel: Rect, bounds: Rect) -> (Pixmap, Pixmap, Chrome) {
+    let mut canvas = Pixmap::new(400, 400).unwrap();
+    for (index, pixel) in canvas
+      .data_mut()
+      .as_chunks_mut::<4>()
+      .0
+      .iter_mut()
+      .enumerate()
+    {
+      let v = (index % 251) as u8;
+      pixel.copy_from_slice(&[v, v.wrapping_add(7), v.wrapping_add(31), 255]);
+    }
+    let backdrop = dimmed(&canvas);
+    let mut chrome = Chrome::new(Backdrop::Frozen);
+    let mut history = History::default();
+    history.push(Shape::Caption {
+      at: Point::new(40.0, 60.0),
+      text: "note".to_string(),
+      color: [255, 255, 255],
+      size: 14.0,
+    });
+    build(
+      &mut chrome,
+      Some(sel),
+      bounds,
+      Tool::Pen,
+      &history,
+      true,
+      Backdrop::Frozen,
+    );
+    (canvas, backdrop, chrome)
+  }
+
+  fn first_difference(left: &[u8], right: &[u8]) -> Option<usize> {
+    left.iter().zip(right).position(|(a, b)| a != b)
+  }
+
+  #[test]
+  fn an_unchanged_state_settles_nowhere() {
+    let Ok(engine) = TextEngine::load() else {
+      return;
+    };
+    let canvas = Pixmap::new(400, 400).unwrap();
+    let backdrop = dimmed(&canvas);
+    let bounds = Rect::new(0.0, 0.0, 400.0, 400.0);
+    let sel = Rect::new(20.0, 20.0, 120.0, 120.0);
+    let mut chrome = Chrome::new(Backdrop::Frozen);
+    build(
+      &mut chrome,
+      Some(sel),
+      bounds,
+      Tool::Pen,
+      &History::default(),
+      true,
+      Backdrop::Frozen,
+    );
+    let scene =
+      scene_of((400, 400), &canvas, &backdrop, &chrome, &engine, Some(sel));
+    let shown = Shown::capture(&scene);
+    let same = Shown::capture(&scene);
+    assert!(
+      shown.settled_from(&same, bounds, &engine).is_empty(),
+      "a frame with nothing new to show should not repaint anything"
+    );
+  }
+
+  #[test]
+  fn a_state_that_moves_the_selection_covers_both_regions() {
+    let Ok(engine) = TextEngine::load() else {
+      return;
+    };
+    let canvas = Pixmap::new(600, 600).unwrap();
+    let backdrop = dimmed(&canvas);
+    let bounds = Rect::new(0.0, 0.0, 600.0, 600.0);
+    let history = History::default();
+    let from = Rect::new(20.0, 20.0, 80.0, 80.0);
+    let to = Rect::new(400.0, 400.0, 80.0, 80.0);
+
+    // The panels hang off the region, so the one built for each of them has to
+    // be part of the damage: the old ones have to be painted out and the new
+    // ones in.
+    let mut old_chrome = Chrome::new(Backdrop::Frozen);
+    build(
+      &mut old_chrome,
+      Some(from),
+      bounds,
+      Tool::Pen,
+      &history,
+      true,
+      Backdrop::Frozen,
+    );
+    let mut new_chrome = Chrome::new(Backdrop::Frozen);
+    build(
+      &mut new_chrome,
+      Some(to),
+      bounds,
+      Tool::Pen,
+      &history,
+      true,
+      Backdrop::Frozen,
+    );
+
+    let before = Shown::capture(&scene_of(
+      (600, 600),
+      &canvas,
+      &backdrop,
+      &old_chrome,
+      &engine,
+      Some(from),
+    ));
+    let after = Shown::capture(&scene_of(
+      (600, 600),
+      &canvas,
+      &backdrop,
+      &new_chrome,
+      &engine,
+      Some(to),
+    ));
+    let area = before.settled_from(&after, bounds, &engine);
+    assert!(
+      area.contains_rect(from) && area.contains_rect(to),
+      "the damage must cover both regions, got {area:?}"
+    );
+    assert!(
+      area.contains_rect(old_chrome.tools[0].area),
+      "the panels that moved away, got {area:?}"
+    );
+    assert!(
+      area.contains_rect(new_chrome.tools[0].area),
+      "and the panels that moved in, got {area:?}"
+    );
+  }
+
+  #[test]
+  fn a_hover_only_change_covers_the_buttons_and_the_tooltip() {
+    let Ok(engine) = TextEngine::load() else {
+      return;
+    };
+    let canvas = Pixmap::new(600, 600).unwrap();
+    let backdrop = dimmed(&canvas);
+    let bounds = Rect::new(0.0, 0.0, 600.0, 600.0);
+    let sel = Rect::new(200.0, 200.0, 120.0, 120.0);
+    let mut chrome = Chrome::new(Backdrop::Frozen);
+    build(
+      &mut chrome,
+      Some(sel),
+      bounds,
+      Tool::Pen,
+      &History::default(),
+      true,
+      Backdrop::Frozen,
+    );
+    let mut cold =
+      scene_of((600, 600), &canvas, &backdrop, &chrome, &engine, Some(sel));
+    let before = Shown::capture(&cold);
+    cold.hotspot = Some(Hotspot::Tool(1));
+    let after = Shown::capture(&cold);
+    let area = before.settled_from(&after, bounds, &engine);
+    let hovered = &chrome.tools[1];
+    assert!(
+      area.contains_rect(hovered.area),
+      "the hovered button must be repainted, got {area:?}"
+    );
+    let tooltip = tooltip_rect(
+      hovered.area,
+      hovered.command.label(),
+      bounds,
+      &engine,
+      Side::Left,
+    );
+    assert!(
+      area.contains_rect(tooltip),
+      "and the tooltip it brings up, got {area:?} missing {tooltip:?}"
     );
   }
 }

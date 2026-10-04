@@ -11,6 +11,8 @@ use anyhow::{anyhow, Result};
 use fontdue::{Font, FontSettings, Metrics};
 use tiny_skia::Pixmap;
 
+use crate::geom::{Point, Rect};
+
 const FONT_FILES: [&str; 4] =
   ["segoeui.ttf", "arial.ttf", "tahoma.ttf", "calibri.ttf"];
 const ASCENT_RATIO: f32 = 0.8;
@@ -131,6 +133,27 @@ impl TextEngine {
       .sum()
   }
 
+  pub fn inked(&self, text: &str, at: Point, size: f32) -> Rect {
+    if text.is_empty() {
+      return Rect::ZERO;
+    }
+    let baseline = at.y + size * ASCENT_RATIO;
+    let mut pen = at.x;
+    let mut area = Rect::ZERO;
+    for ch in text.chars() {
+      let info = self.glyph_info(ch, size);
+      let metrics = &info.metrics;
+      area = area.union(Rect::new(
+        pen + metrics.xmin as f32,
+        baseline - (metrics.ymin + metrics.height as i32) as f32,
+        metrics.width as f32,
+        metrics.height as f32,
+      ));
+      pen += metrics.advance_width;
+    }
+    area.inflated(1.0)
+  }
+
   fn blend(
     pm: &mut Pixmap,
     gx: i32,
@@ -226,6 +249,38 @@ mod tests {
     let small = engine.width("MM", 10.0);
     let large = engine.width("MM", 40.0);
     assert!(large > small, "larger text should be wider");
+  }
+
+  #[test]
+  fn inked_holds_every_pixel_draw_would_touch() {
+    let Ok(engine) = TextEngine::load() else {
+      return;
+    };
+    assert!(
+      engine.inked("", Point::new(10.0, 10.0), 20.0).is_empty(),
+      "nothing to draw means nothing to damage"
+    );
+
+    let at = Point::new(40.0, 60.0);
+    let area = engine.inked("Hg", at, 20.0);
+    let mut pm = Pixmap::new(160, 160).unwrap();
+    engine.draw(&mut pm, "Hg", at.x, at.y, 20.0, [255, 255, 255]);
+
+    for (index, pixel) in pm.data().as_chunks::<4>().0.iter().enumerate() {
+      if pixel[3] == 0 {
+        continue;
+      }
+      let x = (index % 160) as f32;
+      let y = (index / 160) as f32;
+      assert!(
+        area.contains(Point::new(x, y)),
+        "a lit pixel at ({x}, {y}) sits outside the reported area {area:?}"
+      );
+    }
+    assert!(
+      !area.is_empty() && area.w > 20.0,
+      "a two letter run has to report a box, got {area:?}"
+    );
   }
 
   #[test]

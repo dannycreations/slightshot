@@ -225,7 +225,7 @@ pub fn rounded_stroke(
   );
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Icon {
   Pen = 0,
   Marker,

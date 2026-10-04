@@ -36,6 +36,6 @@ codegen-units = 1
 debug = "line-tables-only"
 incremental = false
 lto = true
-opt-level = "z"
+opt-level = 3
 panic = "abort"
 split-debuginfo = "packed"
