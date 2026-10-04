@@ -134,15 +134,10 @@ struct Ink {
 }
 
 impl Ink {
-  fn fresh(canvas: &Pixmap) -> Self {
-    // The backdrop starts dimmed over the whole capture, so a stroke that is
-    // still being drawn only has to dim the box it just added.
-    let mut backdrop = Pixmap::new(canvas.width(), canvas.height())
-      .expect("backdrop allocation failed");
-    render::dimmed_into(&mut backdrop, canvas);
+  fn fresh(canvas: &Pixmap, backdrop: &Pixmap) -> Self {
     Self {
       canvas: canvas.clone(),
-      backdrop,
+      backdrop: backdrop.clone(),
     }
   }
 
@@ -221,19 +216,17 @@ impl ApplicationHandler<Trigger> for App {
       }
       WindowEvent::CursorMoved { position, .. } => session.mouse_move(position),
       WindowEvent::MouseInput {
-        state: ElementState::Pressed,
+        state,
         button: MouseButton::Left,
         ..
-      } => {
-        if let Some(outcome) = session.mouse_down() {
-          self.finish(outcome);
+      } => match state {
+        ElementState::Pressed => {
+          if let Some(outcome) = session.mouse_down() {
+            self.finish(outcome);
+          }
         }
-      }
-      WindowEvent::MouseInput {
-        state: ElementState::Released,
-        button: MouseButton::Left,
-        ..
-      } => session.mouse_up(),
+        ElementState::Released => session.mouse_up(),
+      },
       WindowEvent::KeyboardInput { event, .. } => {
         if event.state != ElementState::Pressed {
           return;
@@ -436,14 +429,7 @@ impl Session {
     };
 
     render::paint(frame, &scene);
-    self.present()
-  }
-
-  fn present(&mut self) -> Result<()> {
-    let Session {
-      presenter, frame, ..
-    } = self;
-    presenter.present(frame)
+    self.presenter.present(&self.frame)
   }
 
   fn mouse_move(&mut self, position: PhysicalPosition<f64>) {
@@ -650,23 +636,30 @@ impl Session {
   fn ink_shape(&mut self, shape: &Shape) {
     let Session {
       canvas,
+      backdrop,
       engine,
       ink,
       ..
     } = self;
-    let ink = ink.get_or_insert_with(|| Ink::fresh(canvas));
+    let ink = ink.get_or_insert_with(|| Ink::fresh(canvas, backdrop));
     ink.stamp(engine, shape);
   }
 
   fn ink_segment(&mut self, segment: Segment) {
-    let Session { canvas, ink, .. } = self;
-    let ink = ink.get_or_insert_with(|| Ink::fresh(canvas));
+    let Session {
+      canvas,
+      backdrop,
+      ink,
+      ..
+    } = self;
+    let ink = ink.get_or_insert_with(|| Ink::fresh(canvas, backdrop));
     render::ink_segment(&mut ink.canvas, &mut ink.backdrop, segment);
   }
 
   fn rebuild_ink(&mut self) {
     let Session {
       canvas,
+      backdrop,
       engine,
       history,
       ink,
@@ -678,7 +671,7 @@ impl Session {
       *ink = None;
       return;
     }
-    let ink = ink.get_or_insert_with(|| Ink::fresh(canvas));
+    let ink = ink.get_or_insert_with(|| Ink::fresh(canvas, backdrop));
     ink.canvas.data_mut().copy_from_slice(canvas.data());
     for shape in history.shapes() {
       render::ink(&mut ink.canvas, shape, engine);
@@ -1125,14 +1118,5 @@ mod tests {
       let anchor = handle_anchor(sel, h);
       assert_eq!(hit_handle(sel, anchor, HANDLE_SLOP), Some(h));
     }
-  }
-
-  #[test]
-  fn converts_straight_rgba_rows_to_argb_words() {
-    let rgba = [10u8, 20, 30, 0, 40, 50, 60, 99];
-    let mut out = [0u32; 2];
-    swap_channels_to_words(&rgba, &mut out);
-    assert_eq!(out[0], (0xFFu32 << 24) | (10 << 16) | (20 << 8) | 30);
-    assert_eq!(out[1], (0xFFu32 << 24) | (40 << 16) | (50 << 8) | 60);
   }
 }

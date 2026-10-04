@@ -1,4 +1,4 @@
-use std::{ffi::c_void, mem, ptr, slice};
+use std::{ffi::c_void, ptr, slice};
 
 use anyhow::{bail, Context, Result};
 use tiny_skia::Pixmap;
@@ -6,8 +6,8 @@ use windows::Win32::{
   Foundation::{COLORREF, HWND, POINT, RECT, SIZE},
   Graphics::Gdi::{
     CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC,
-    ReleaseDC, SelectObject, AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO,
-    BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, DIB_RGB_COLORS, HDC, HGDIOBJ,
+    ReleaseDC, SelectObject, AC_SRC_ALPHA, AC_SRC_OVER, BLENDFUNCTION,
+    DIB_RGB_COLORS, HDC, HGDIOBJ,
   },
   UI::WindowsAndMessaging::{
     GetWindowLongPtrW, GetWindowRect, SetWindowLongPtrW, UpdateLayeredWindow,
@@ -15,7 +15,7 @@ use windows::Win32::{
   },
 };
 
-use crate::pixel::swap_channels_keeping_alpha;
+use crate::{capture::dib_info, pixel::swap_channels_keeping_alpha};
 
 pub struct Layered {
   window: HWND,
@@ -62,19 +62,7 @@ impl Layered {
         bail!("CreateCompatibleDC failed for the live overlay");
       }
 
-      let info = BITMAPINFO {
-        bmiHeader: BITMAPINFOHEADER {
-          biSize: mem::size_of::<BITMAPINFOHEADER>() as u32,
-          biWidth: width as i32,
-          biHeight: -(height as i32), // negative: rows top-down
-          biPlanes: 1,
-          biBitCount: 32,
-          biCompression: BI_RGB.0,
-          biSizeImage: pixels as u32,
-          ..BITMAPINFOHEADER::default()
-        },
-        ..BITMAPINFO::default()
-      };
+      let info = dib_info(width, height);
       let mut bits: *mut c_void = ptr::null_mut();
       let bitmap = CreateDIBSection(
         Some(layer.memory),

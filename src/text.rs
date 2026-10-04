@@ -100,21 +100,19 @@ impl TextEngine {
     for ch in text.chars() {
       let info = self.glyph_info(ch, size);
       let m = &info.metrics;
-      if m.width > 0 && m.height > 0 {
-        let left = pen + m.xmin as f32;
-        let top = baseline - (m.ymin + m.height as i32) as f32;
-        let atlas = self.atlas.borrow();
-        let coverage =
-          &atlas[info.offset as usize..(info.offset + info.len) as usize];
-        Self::blend(
-          pm,
-          left.round() as i32,
-          top.round() as i32,
-          m,
-          coverage,
-          rgb,
-        );
-      }
+      let left = pen + m.xmin as f32;
+      let top = baseline - (m.ymin + m.height as i32) as f32;
+      let atlas = self.atlas.borrow();
+      let coverage =
+        &atlas[info.offset as usize..(info.offset + info.len) as usize];
+      Self::blend(
+        pm,
+        left.round() as i32,
+        top.round() as i32,
+        m,
+        coverage,
+        rgb,
+      );
       pen += m.advance_width;
     }
   }

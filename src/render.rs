@@ -171,13 +171,9 @@ pub fn build(
   let Some(sel) = selection.filter(|_| show_chrome) else {
     return;
   };
-  let hang = match live {
-    true => Hang::Centered,
-    false => Hang::OffSelection,
-  };
-  layout_panel(&mut chrome.tools, sel, bounds, Axis::Vertical, hang);
+  layout_panel(&mut chrome.tools, sel, bounds, Panel::Column { live });
   if !live {
-    layout_panel(&mut chrome.actions, sel, bounds, Axis::Horizontal, hang);
+    layout_panel(&mut chrome.actions, sel, bounds, Panel::Row);
   }
 }
 
@@ -197,55 +193,44 @@ pub fn hotspot_at(chrome: &Chrome, p: Point) -> Option<Hotspot> {
 }
 
 #[derive(Clone, Copy)]
-enum Axis {
-  Vertical,
-  Horizontal,
+enum Panel {
+  Column { live: bool },
+  Row,
 }
 
-#[derive(Clone, Copy)]
-enum Hang {
-  OffSelection,
-  Centered,
-}
-
-fn layout_panel(
-  buttons: &mut [Button],
-  sel: Rect,
-  bounds: Rect,
-  axis: Axis,
-  hang: Hang,
-) {
+fn layout_panel(buttons: &mut [Button], sel: Rect, bounds: Rect, panel: Panel) {
   let count = buttons.len() as f32;
   let step = BUTTON + TOOL_GAP;
   let main = count * BUTTON + (count - 1.0) * TOOL_GAP + PANEL_PAD * 2.0;
   let cross = BUTTON + PANEL_PAD * 2.0;
-  let (width, height) = match axis {
-    Axis::Vertical => (cross, main),
-    Axis::Horizontal => (main, cross),
+  let (width, height) = match panel {
+    Panel::Column { .. } => (cross, main),
+    Panel::Row => (main, cross),
   };
 
-  let (x, y) = match axis {
-    Axis::Vertical => {
+  let (x, y) = match panel {
+    Panel::Column { live } => {
       let mut x = sel.right() + 6.0;
       if x + width > bounds.right() {
         x = sel.right() - width - 6.0;
       }
       x = clamp_span(x, width, bounds.x, bounds.right());
-      let y = match hang {
-        Hang::OffSelection => (sel.bottom() - height).clamp(
-          bounds.y + 4.0,
-          (bounds.bottom() - height - 4.0).max(bounds.y),
-        ),
-        Hang::Centered => clamp_span(
+      let y = if live {
+        clamp_span(
           sel.center().y - height * 0.5,
           height,
           bounds.y + 4.0,
           bounds.bottom() - 4.0,
-        ),
+        )
+      } else {
+        (sel.bottom() - height).clamp(
+          bounds.y + 4.0,
+          (bounds.bottom() - height - 4.0).max(bounds.y),
+        )
       };
       (x, y)
     }
-    Axis::Horizontal => {
+    Panel::Row => {
       let x = (sel.right() - width).max(bounds.x);
       let mut y = sel.bottom() + 8.0;
       if y + height > bounds.bottom() {
@@ -257,9 +242,9 @@ fn layout_panel(
   };
 
   for (index, button) in buttons.iter_mut().enumerate() {
-    let (dx, dy) = match axis {
-      Axis::Vertical => (0.0, index as f32 * step),
-      Axis::Horizontal => (index as f32 * step, 0.0),
+    let (dx, dy) = match panel {
+      Panel::Column { .. } => (0.0, index as f32 * step),
+      Panel::Row => (index as f32 * step, 0.0),
     };
     button.area =
       Rect::new(x + PANEL_PAD + dx, y + PANEL_PAD + dy, BUTTON, BUTTON);
@@ -326,14 +311,19 @@ const DIM_LUT: [u8; 256] = {
   lut
 };
 
+#[inline(always)]
+fn dim_pixel(dst: &mut [u8], src: &[u8]) {
+  dst[0] = DIM_LUT[src[0] as usize];
+  dst[1] = DIM_LUT[src[1] as usize];
+  dst[2] = DIM_LUT[src[2] as usize];
+  dst[3] = src[3];
+}
+
 pub fn dimmed_into(dst: &mut Pixmap, src: &Pixmap) {
-  let dst_chunks = dst.data_mut().as_chunks_mut::<4>().0;
-  let src_chunks = src.data().as_chunks::<4>().0;
-  for (dst_px, src_px) in dst_chunks.iter_mut().zip(src_chunks) {
-    dst_px[0] = DIM_LUT[src_px[0] as usize];
-    dst_px[1] = DIM_LUT[src_px[1] as usize];
-    dst_px[2] = DIM_LUT[src_px[2] as usize];
-    dst_px[3] = src_px[3];
+  let dst_pixels = dst.data_mut().as_chunks_mut::<4>().0;
+  let src_pixels = src.data().as_chunks::<4>().0;
+  for (dst_px, src_px) in dst_pixels.iter_mut().zip(src_pixels) {
+    dim_pixel(dst_px, src_px);
   }
 }
 
@@ -364,10 +354,7 @@ fn dim_region_into(dst: &mut Pixmap, src: &Pixmap, rect: Rect) {
       .iter()
       .zip(dst_pixels.as_chunks_mut::<4>().0)
     {
-      dst_px[0] = DIM_LUT[src_px[0] as usize];
-      dst_px[1] = DIM_LUT[src_px[1] as usize];
-      dst_px[2] = DIM_LUT[src_px[2] as usize];
-      dst_px[3] = src_px[3];
+      dim_pixel(dst_px, src_px);
     }
   }
 }

@@ -41,6 +41,22 @@ pub fn desktop() -> Result<Desktop> {
   }
 }
 
+pub(crate) fn dib_info(width: u32, height: u32) -> BITMAPINFO {
+  BITMAPINFO {
+    bmiHeader: BITMAPINFOHEADER {
+      biSize: mem::size_of::<BITMAPINFOHEADER>() as u32,
+      biWidth: width as i32,
+      biHeight: -(height as i32),
+      biPlanes: 1,
+      biBitCount: 32,
+      biCompression: BI_RGB.0,
+      biSizeImage: width * height * 4,
+      ..BITMAPINFOHEADER::default()
+    },
+    ..BITMAPINFO::default()
+  }
+}
+
 struct GdiCaptureGuard {
   screen_dc: HDC,
   mem_dc: HDC,
@@ -93,19 +109,7 @@ pub fn grab() -> Result<Pixmap> {
       previous: HGDIOBJ::default(),
     };
 
-    let info = BITMAPINFO {
-      bmiHeader: BITMAPINFOHEADER {
-        biSize: mem::size_of::<BITMAPINFOHEADER>() as u32,
-        biWidth: width,
-        biHeight: -height, // negative: rows top-down
-        biPlanes: 1,
-        biBitCount: 32,
-        biCompression: BI_RGB.0,
-        biSizeImage: pixels as u32,
-        ..BITMAPINFOHEADER::default()
-      },
-      ..BITMAPINFO::default()
-    };
+    let info = dib_info(size.0, size.1);
 
     let mut bits: *mut c_void = ptr::null_mut();
     let bmp =
