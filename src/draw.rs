@@ -2,14 +2,14 @@ use std::{cell::RefCell, collections::HashMap, sync::OnceLock};
 
 use tiny_skia::{
   Color, FillRule, LineCap, LineJoin, Paint, Path, PathBuilder, Pixmap,
-  PixmapPaint, Rect, Shader, Stroke, StrokeDash, Transform,
+  PixmapPaint, Rect as SkRect, Shader, Stroke, StrokeDash, Transform,
 };
 
-use crate::geom::{Point, Rect as GeoRect};
+use crate::geom::{Point, Rect};
 
 #[inline(always)]
-fn skia_rect(rect: GeoRect) -> Option<Rect> {
-  Rect::from_xywh(rect.x, rect.y, rect.w, rect.h)
+fn skia_rect(rect: Rect) -> Option<SkRect> {
+  SkRect::from_xywh(rect.x, rect.y, rect.w, rect.h)
 }
 
 #[inline(always)]
@@ -32,7 +32,7 @@ fn stroke(width: f32) -> Stroke {
 }
 
 #[inline]
-fn rect_path(rect: GeoRect) -> Option<Path> {
+fn rect_path(rect: Rect) -> Option<Path> {
   let r = skia_rect(rect)?;
   let mut path = PathBuilder::new();
   path.push_rect(r);
@@ -115,7 +115,7 @@ pub fn arrow_head(
 
 pub fn rect_stroke(
   pm: &mut Pixmap,
-  rect: GeoRect,
+  rect: Rect,
   rgb: [u8; 3],
   width: f32,
   alpha: u8,
@@ -133,7 +133,7 @@ pub fn rect_stroke(
 }
 
 #[inline(always)]
-pub fn rect_fill(pm: &mut Pixmap, rect: GeoRect, rgb: [u8; 3], alpha: u8) {
+pub fn rect_fill(pm: &mut Pixmap, rect: Rect, rgb: [u8; 3], alpha: u8) {
   let Some(r) = skia_rect(rect) else {
     return;
   };
@@ -145,7 +145,7 @@ pub fn rect_fill(pm: &mut Pixmap, rect: GeoRect, rgb: [u8; 3], alpha: u8) {
   );
 }
 
-pub fn dashed_rect(pm: &mut Pixmap, rect: GeoRect, rgb: [u8; 3]) {
+pub fn dashed_rect(pm: &mut Pixmap, rect: Rect, rgb: [u8; 3]) {
   let Some(path) = rect_path(rect) else {
     return;
   };
@@ -165,7 +165,7 @@ pub fn dashed_rect(pm: &mut Pixmap, rect: GeoRect, rgb: [u8; 3]) {
   );
 }
 
-fn round_rect_path(r: Rect, radius: f32) -> Option<Path> {
+fn round_rect_path(r: SkRect, radius: f32) -> Option<Path> {
   let rr = radius.min(r.width() * 0.5).min(r.height() * 0.5);
   let mut path = PathBuilder::new();
   path.move_to(r.x() + rr, r.y());
@@ -182,13 +182,13 @@ fn round_rect_path(r: Rect, radius: f32) -> Option<Path> {
 }
 
 #[inline]
-fn rounded_path(rect: GeoRect, radius: f32) -> Option<Path> {
+fn rounded_path(rect: Rect, radius: f32) -> Option<Path> {
   round_rect_path(skia_rect(rect)?, radius)
 }
 
 pub fn rounded_fill(
   pm: &mut Pixmap,
-  rect: GeoRect,
+  rect: Rect,
   radius: f32,
   rgb: [u8; 3],
   alpha: u8,
@@ -207,7 +207,7 @@ pub fn rounded_fill(
 
 pub fn rounded_stroke(
   pm: &mut Pixmap,
-  rect: GeoRect,
+  rect: Rect,
   radius: f32,
   rgb: [u8; 3],
   width: f32,
@@ -403,7 +403,7 @@ mod tests {
     let mut pm = Pixmap::new(20, 20).expect("alloc");
     rounded_fill(
       &mut pm,
-      GeoRect::new(4.0, 4.0, 12.0, 12.0),
+      Rect::new(4.0, 4.0, 12.0, 12.0),
       3.0,
       [0, 128, 255],
       255,
@@ -424,7 +424,7 @@ mod tests {
     let by = 285.0;
     rounded_fill(
       &mut pm,
-      GeoRect::new(bx, by, 30.0, 30.0),
+      Rect::new(bx, by, 30.0, 30.0),
       5.0,
       [12, 12, 12],
       175,
@@ -450,7 +450,7 @@ mod tests {
   fn dashed_rect_and_rect_stroke_share_the_same_path_helper() {
     let mut a = Pixmap::new(20, 20).expect("alloc");
     let mut b = Pixmap::new(20, 20).expect("alloc");
-    let r = GeoRect::new(2.0, 2.0, 10.0, 10.0);
+    let r = Rect::new(2.0, 2.0, 10.0, 10.0);
     rect_stroke(&mut a, r, [255, 255, 255], 1.0, 255);
     dashed_rect(&mut b, r, [255, 255, 255]);
     assert!(a.data().iter().any(|&p| p != 0));
@@ -462,7 +462,7 @@ mod tests {
     let mut pm = Pixmap::new(20, 20).expect("alloc");
     rounded_fill(
       &mut pm,
-      GeoRect::new(5.0, 5.0, 10.0, 10.0),
+      Rect::new(5.0, 5.0, 10.0, 10.0),
       3.0,
       [1, 2, 3],
       255,

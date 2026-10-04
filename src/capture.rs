@@ -41,7 +41,7 @@ pub fn desktop() -> Result<Desktop> {
   }
 }
 
-pub(crate) fn dib_info(width: u32, height: u32) -> BITMAPINFO {
+fn dib_info(width: u32, height: u32) -> BITMAPINFO {
   BITMAPINFO {
     bmiHeader: BITMAPINFOHEADER {
       biSize: mem::size_of::<BITMAPINFOHEADER>() as u32,
@@ -57,28 +57,101 @@ pub(crate) fn dib_info(width: u32, height: u32) -> BITMAPINFO {
   }
 }
 
-struct GdiCaptureGuard {
-  screen_dc: HDC,
-  mem_dc: HDC,
-  bmp: HGDIOBJ,
+pub struct Bitmap {
+  screen: HDC,
+  memory: HDC,
+  bitmap: HGDIOBJ,
   previous: HGDIOBJ,
+  pixels: *mut u8,
+  width: u32,
+  height: u32,
 }
 
-impl Drop for GdiCaptureGuard {
-  fn drop(&mut self) {
-    // SAFETY: each handle was created by this thread (GetDC, CreateCompatibleDC,
-    // CreateDIBSection) and is released exactly once; `bmp` is only deleted
-    // after the memory DC is pointed back at `previous`.
+impl Bitmap {
+  pub fn new(width: u32, height: u32) -> Result<Self> {
+    // Partly built on purpose: `Drop` releases whatever has been made so far,
+    // so every early return below still gives the handles back.
+    let mut section = Self {
+      screen: HDC::default(),
+      memory: HDC::default(),
+      bitmap: HGDIOBJ::default(),
+      previous: HGDIOBJ::default(),
+      pixels: ptr::null_mut(),
+      width,
+      height,
+    };
+    // SAFETY: each handle is stored in `section` before the next call can
+    // fail, and the section stays mapped and untouched by anyone else until
+    // `Drop`.
     unsafe {
-      if !self.bmp.is_invalid() {
-        SelectObject(self.mem_dc, self.previous);
-        let _ = DeleteObject(self.bmp);
+      section.screen = GetDC(None);
+      if section.screen.is_invalid() {
+        bail!("no screen device context");
       }
-      if !self.mem_dc.is_invalid() {
-        let _ = DeleteDC(self.mem_dc);
+      section.memory = CreateCompatibleDC(Some(section.screen));
+      if section.memory.is_invalid() {
+        bail!("CreateCompatibleDC failed");
       }
-      if !self.screen_dc.is_invalid() {
-        ReleaseDC(None, self.screen_dc);
+      let mut bits: *mut c_void = ptr::null_mut();
+      let bitmap = CreateDIBSection(
+        Some(section.memory),
+        &dib_info(width, height),
+        DIB_RGB_COLORS,
+        &mut bits,
+        None,
+        0,
+      )
+      .context("CreateDIBSection failed")?;
+      section.previous = SelectObject(section.memory, bitmap.into());
+      section.bitmap = bitmap.into();
+      if bits.is_null() {
+        bail!("the DIB section came back without any pixels");
+      }
+      section.pixels = bits.cast();
+    }
+    Ok(section)
+  }
+
+  pub fn screen_dc(&self) -> HDC {
+    self.screen
+  }
+
+  pub fn memory_dc(&self) -> HDC {
+    self.memory
+  }
+
+  pub fn pixels(&self) -> &[u8] {
+    // SAFETY: `new` mapped exactly this many bytes and `Drop` is the only
+    // thing that unmaps them, which cannot run while this borrow is alive.
+    unsafe { slice::from_raw_parts(self.pixels, self.len()) }
+  }
+
+  pub fn pixels_mut(&mut self) -> &mut [u8] {
+    // SAFETY: as `pixels`, and the exclusive borrow rules out a shared one.
+    unsafe { slice::from_raw_parts_mut(self.pixels, self.len()) }
+  }
+
+  fn len(&self) -> usize {
+    (self.width as usize) * (self.height as usize) * 4
+  }
+}
+
+impl Drop for Bitmap {
+  fn drop(&mut self) {
+    // SAFETY: each handle was created by `new` on the thread that owns this
+    // struct and is released exactly once, including when `new` returns early.
+    // `bitmap` is only deleted after the memory DC has been pointed back at
+    // `previous`.
+    unsafe {
+      if !self.bitmap.is_invalid() {
+        SelectObject(self.memory, self.previous);
+        let _ = DeleteObject(self.bitmap);
+      }
+      if !self.memory.is_invalid() {
+        let _ = DeleteDC(self.memory);
+      }
+      if !self.screen.is_invalid() {
+        ReleaseDC(None, self.screen);
       }
     }
   }
@@ -86,68 +159,28 @@ impl Drop for GdiCaptureGuard {
 
 pub fn grab() -> Result<Pixmap> {
   let Desktop { origin, size } = desktop()?;
-  let (x, y) = origin;
-  let (width, height) = (size.0 as i32, size.1 as i32);
-  // SAFETY: every handle created below is owned by `guard`, whose `Drop` runs
-  // on all exit paths including `?`. The bitmap stays mapped and untouched by
-  // anyone else until then, and its pixels are copied out before this function
-  // returns, which is also when the handles are released.
+  let section = Bitmap::new(size.0, size.1)?;
+  // SAFETY: both handles belong to `section`, which outlives the blit, and the
+  // destination is the section mapped for exactly this width by height.
   unsafe {
-    let pixels = (width * height * 4) as usize;
-
-    let screen_dc = GetDC(None);
-    let mem_dc = CreateCompatibleDC(Some(screen_dc));
-    if mem_dc.is_invalid() {
-      ReleaseDC(None, screen_dc);
-      bail!("CreateCompatibleDC failed");
-    }
-
-    let mut guard = GdiCaptureGuard {
-      screen_dc,
-      mem_dc,
-      bmp: HGDIOBJ::default(),
-      previous: HGDIOBJ::default(),
-    };
-
-    let info = dib_info(size.0, size.1);
-
-    let mut bits: *mut c_void = ptr::null_mut();
-    let bmp =
-      CreateDIBSection(Some(mem_dc), &info, DIB_RGB_COLORS, &mut bits, None, 0)
-        .context("CreateDIBSection failed")?;
-
-    guard.previous = SelectObject(mem_dc, bmp.into());
-    guard.bmp = bmp.into();
-
     BitBlt(
-      mem_dc,
+      section.memory_dc(),
       0,
       0,
-      width,
-      height,
-      Some(screen_dc),
-      x,
-      y,
+      size.0 as i32,
+      size.1 as i32,
+      Some(section.screen_dc()),
+      origin.0,
+      origin.1,
       SRCCOPY | CAPTUREBLT,
     )
     .context("BitBlt of the desktop failed")?;
-
-    let size = IntSize::from_wh(width as u32, height as u32)
-      .context("invalid capture dimensions")?;
-
-    let mut data: Vec<u8> = Vec::with_capacity(pixels);
-    // SAFETY: `u8` has no invalid bit patterns, and the `swap_channels` call
-    // immediately below unconditionally overwrites every element in `0..pixels`,
-    // so the vector is fully initialized before anything reads from it.
-    #[allow(clippy::uninit_vec)]
-    data.set_len(pixels);
-
-    let raw = slice::from_raw_parts(bits as *const u8, pixels);
-    swap_channels(raw, &mut data);
-
-    let pixmap = Pixmap::from_vec(data, size)
-      .context("zero-sized capture or allocation failed")?;
-
-    Ok(pixmap)
   }
+  let mut data = vec![0u8; section.pixels().len()];
+  swap_channels(section.pixels(), &mut data);
+  Pixmap::from_vec(
+    data,
+    IntSize::from_wh(size.0, size.1).context("invalid capture dimensions")?,
+  )
+  .context("zero-sized capture or allocation failed")
 }

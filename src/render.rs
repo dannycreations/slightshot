@@ -8,8 +8,6 @@ use crate::{
   text::TextEngine,
 };
 
-pub const HANDLE_SLOP: f32 = 7.0;
-
 const MIN_REGION: f32 = 6.0;
 const DIM_ALPHA: u8 = 105;
 const BUTTON: f32 = 30.0;
@@ -113,10 +111,14 @@ pub struct Chrome {
   pub actions: Vec<Button>,
 }
 
-impl Default for Chrome {
-  fn default() -> Self {
+impl Chrome {
+  pub fn new(backdrop: Backdrop) -> Self {
+    let mut tools = TOOL_BUTTONS.to_vec();
+    if !backdrop.picks_region() {
+      tools.push(button(Command::Close, draw::Icon::Close));
+    }
     Self {
-      tools: TOOL_BUTTONS.to_vec(),
+      tools,
       actions: ACTION_BUTTONS.to_vec(),
     }
   }
@@ -153,11 +155,6 @@ pub fn build(
   backdrop: Backdrop,
 ) {
   let live = !backdrop.picks_region();
-  chrome.tools.truncate(TOOL_BUTTONS.len());
-  if live {
-    chrome.tools.push(button(Command::Close, draw::Icon::Close));
-  }
-
   let ready =
     backdrop.picks_region() && deliverable_region(selection).is_some();
   let can_undo = history.can_undo();
@@ -741,7 +738,7 @@ mod tests {
 
   #[test]
   fn hotspot_at_finds_button_under_point() {
-    let mut chrome = Chrome::default();
+    let mut chrome = Chrome::new(Backdrop::Frozen);
     chrome.actions[0].area = Rect::new(10.0, 10.0, 30.0, 30.0);
     assert_eq!(
       hotspot_at(&chrome, Point::new(20.0, 20.0)),
@@ -776,7 +773,7 @@ mod tests {
   fn build_hides_buttons_without_selection() {
     let sel = Rect::new(10.0, 10.0, 200.0, 150.0);
     let bounds = Rect::new(0.0, 0.0, 1920.0, 1080.0);
-    let mut chrome = Chrome::default();
+    let mut chrome = Chrome::new(Backdrop::Frozen);
     build(
       &mut chrome,
       Some(sel),
@@ -805,7 +802,7 @@ mod tests {
     // Tall enough for the whole column, so it can hang off the region's own
     // bottom edge rather than being clamped back onto the screen.
     let sel = Rect::new(10.0, 10.0, 200.0, 400.0);
-    let mut chrome = Chrome::default();
+    let mut chrome = Chrome::new(Backdrop::Frozen);
     build(
       &mut chrome,
       Some(sel),
@@ -835,7 +832,7 @@ mod tests {
   fn build_hides_buttons_when_not_idle() {
     let sel = Rect::new(10.0, 10.0, 200.0, 150.0);
     let bounds = Rect::new(0.0, 0.0, 1920.0, 1080.0);
-    let mut chrome = Chrome::default();
+    let mut chrome = Chrome::new(Backdrop::Frozen);
     build(
       &mut chrome,
       Some(sel),
@@ -863,7 +860,7 @@ mod tests {
     let bounds = Rect::new(0.0, 0.0, 1920.0, 1080.0);
     let ready = Rect::new(10.0, 10.0, 200.0, 150.0);
     let mut history = History::default();
-    let mut chrome = Chrome::default();
+    let mut chrome = Chrome::new(Backdrop::Frozen);
     build(
       &mut chrome,
       Some(ready),
@@ -931,7 +928,7 @@ mod tests {
       color: [0, 0, 0],
       size: 10.0,
     });
-    let mut chrome = Chrome::default();
+    let mut chrome = Chrome::new(Backdrop::Live);
     build(
       &mut chrome,
       Some(sel),
@@ -957,7 +954,7 @@ mod tests {
     // moment the overlay opens rather than after a drag. Nothing was captured,
     // so the row of delivery actions stays hidden and Close ends the column.
     let bounds = Rect::new(0.0, 0.0, 1920.0, 1080.0);
-    let mut chrome = Chrome::default();
+    let mut chrome = Chrome::new(Backdrop::Live);
     build(
       &mut chrome,
       Some(bounds),
@@ -1164,7 +1161,7 @@ mod tests {
     let sel = Rect::new(5.0, 5.0, 30.0, 70.0);
     let selection = Some(sel);
     let history = History::default();
-    let mut chrome = Chrome::default();
+    let mut chrome = Chrome::new(Backdrop::Frozen);
     build(
       &mut chrome,
       selection,

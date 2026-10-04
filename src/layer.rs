@@ -1,94 +1,47 @@
-use std::{ffi::c_void, ptr, slice};
-
 use anyhow::{bail, Context, Result};
 use tiny_skia::Pixmap;
 use windows::Win32::{
   Foundation::{COLORREF, HWND, POINT, RECT, SIZE},
-  Graphics::Gdi::{
-    CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC,
-    ReleaseDC, SelectObject, AC_SRC_ALPHA, AC_SRC_OVER, BLENDFUNCTION,
-    DIB_RGB_COLORS, HDC, HGDIOBJ,
-  },
+  Graphics::Gdi::{AC_SRC_ALPHA, AC_SRC_OVER, BLENDFUNCTION},
   UI::WindowsAndMessaging::{
     GetWindowLongPtrW, GetWindowRect, SetWindowLongPtrW, UpdateLayeredWindow,
     GWL_EXSTYLE, ULW_ALPHA, WS_EX_LAYERED,
   },
 };
 
-use crate::{capture::dib_info, pixel::swap_channels_keeping_alpha};
+use crate::{capture::Bitmap, pixel::swap_channels_keeping_alpha};
 
 pub struct Layered {
   window: HWND,
-  screen: HDC,
-  memory: HDC,
-  bitmap: HGDIOBJ,
-  previous: HGDIOBJ,
-  bits: *mut u8,
-  pixels: usize,
+  surface: Bitmap,
   at: POINT,
   size: SIZE,
 }
 
 impl Layered {
   pub fn new(window: HWND, width: u32, height: u32) -> Result<Self> {
-    let pixels = (width as usize) * (height as usize) * 4;
-    // Partly built on purpose: `Drop` releases whatever was made so far, so
-    // every early return below still gives the handles back.
-    let mut layer = Self {
+    let surface =
+      Bitmap::new(width, height).context("opening the live overlay failed")?;
+    // SAFETY: `window` is the handle of the window just created, which outlives
+    // this call, and the call only reads its position.
+    let at = unsafe {
+      let mut rect = RECT::default();
+      GetWindowRect(window, &mut rect)
+        .context("the live overlay has no window position")?;
+      POINT {
+        x: rect.left,
+        y: rect.top,
+      }
+    };
+    Ok(Self {
       window,
-      screen: HDC::default(),
-      memory: HDC::default(),
-      bitmap: HGDIOBJ::default(),
-      previous: HGDIOBJ::default(),
-      bits: ptr::null_mut(),
-      pixels,
-      at: POINT::default(),
+      surface,
+      at,
       size: SIZE {
         cx: width as i32,
         cy: height as i32,
       },
-    };
-
-    // SAFETY: every handle created below is owned by `layer`, whose `Drop`
-    // runs on all exit paths including `?`. The bitmap stays mapped and
-    // untouched by anyone else until then.
-    unsafe {
-      layer.screen = GetDC(None);
-      if layer.screen.is_invalid() {
-        bail!("no screen device context for the live overlay");
-      }
-      layer.memory = CreateCompatibleDC(Some(layer.screen));
-      if layer.memory.is_invalid() {
-        bail!("CreateCompatibleDC failed for the live overlay");
-      }
-
-      let info = dib_info(width, height);
-      let mut bits: *mut c_void = ptr::null_mut();
-      let bitmap = CreateDIBSection(
-        Some(layer.memory),
-        &info,
-        DIB_RGB_COLORS,
-        &mut bits,
-        None,
-        0,
-      )
-      .context("CreateDIBSection failed for the live overlay")?;
-      layer.previous = SelectObject(layer.memory, bitmap.into());
-      layer.bitmap = bitmap.into();
-      if bits.is_null() {
-        bail!("the live overlay surface came back without any pixels");
-      }
-      layer.bits = bits.cast();
-
-      let mut rect = RECT::default();
-      GetWindowRect(window, &mut rect)
-        .context("the live overlay has no window position")?;
-      layer.at = POINT {
-        x: rect.left,
-        y: rect.top,
-      };
-    }
-    Ok(layer)
+    })
   }
 
   pub fn present(&mut self, frame: &Pixmap) -> Result<()> {
@@ -112,20 +65,18 @@ impl Layered {
       SourceConstantAlpha: 255,
       AlphaFormat: AC_SRC_ALPHA as u8,
     };
-    // SAFETY: `bits` covers `pixels` bytes of the section created above, the
-    // frame has just been checked to be the same size, and the pointers below
-    // are either null or values this struct owns and keeps alive across the
-    // call.
+    let source = POINT::default();
+    swap_channels_keeping_alpha(frame.data(), self.surface.pixels_mut());
+    // SAFETY: the section has just been filled with a frame of exactly this
+    // size, and the handles and positions passed here belong to this struct and
+    // to the window it outlives.
     unsafe {
-      let surface = slice::from_raw_parts_mut(self.bits, self.pixels);
-      swap_channels_keeping_alpha(frame.data(), surface);
-      let source = POINT::default();
       UpdateLayeredWindow(
         self.window,
-        Some(self.screen),
+        Some(self.surface.screen_dc()),
         Some(&self.at),
         Some(&self.size),
-        Some(self.memory),
+        Some(self.surface.memory_dc()),
         Some(&source),
         COLORREF(0),
         Some(&blend),
@@ -151,26 +102,5 @@ impl Layered {
       }
     }
     Ok(())
-  }
-}
-
-impl Drop for Layered {
-  fn drop(&mut self) {
-    // SAFETY: each handle was created by `new` on the thread that owns this
-    // struct and is released exactly once, including when `new` returns early.
-    // `bitmap` is only deleted after the memory DC has been pointed back at
-    // `previous`.
-    unsafe {
-      if !self.bitmap.is_invalid() {
-        SelectObject(self.memory, self.previous);
-        let _ = DeleteObject(self.bitmap);
-      }
-      if !self.memory.is_invalid() {
-        let _ = DeleteDC(self.memory);
-      }
-      if !self.screen.is_invalid() {
-        ReleaseDC(None, self.screen);
-      }
-    }
   }
 }

@@ -144,33 +144,11 @@ pub fn handle_anchor(rect: Rect, handle: Handle) -> Point {
   Point::new(x, y)
 }
 
+/// How close the cursor has to be to a handle to grab it.
+pub const HANDLE_SLOP: f32 = 7.0;
+
 #[inline]
 pub fn hit_handle(rect: Rect, p: Point, slop: f32) -> Option<Handle> {
-  let right = rect.right();
-  let bottom = rect.bottom();
-  // Early bounding box rejection: cursor must be near the outer bounds
-  if p.x < rect.x - slop
-    || p.x > right + slop
-    || p.y < rect.y - slop
-    || p.y > bottom + slop
-  {
-    return None;
-  }
-  // Deep interior rejection: cursor cannot hit handles if it is well inside
-  if rect.w > slop * 2.0 && rect.h > slop * 2.0 {
-    let inner_left = rect.x + slop;
-    let inner_right = right - slop;
-    let inner_top = rect.y + slop;
-    let inner_bottom = bottom - slop;
-    if p.x > inner_left
-      && p.x < inner_right
-      && p.y > inner_top
-      && p.y < inner_bottom
-    {
-      return None;
-    }
-  }
-
   let slop_sq = slop * slop;
   HANDLES
     .into_iter()
@@ -218,6 +196,35 @@ mod tests {
     let corner = handle_anchor(rect, Handle::TopRight);
     assert_eq!(hit_handle(rect, corner, 5.0), Some(Handle::TopRight));
     assert_eq!(hit_handle(rect, Point::new(55.0, 55.0), 5.0), None);
+  }
+
+  #[test]
+  fn hit_handle_returns_the_first_anchor_within_the_slop() {
+    /// Every anchor, in order, with no early exit of any kind. This is the
+    /// whole contract: the first handle within `slop`, or nothing.
+    fn scan(rect: Rect, p: Point, slop: f32) -> Option<Handle> {
+      HANDLES
+        .into_iter()
+        .find(|&h| handle_anchor(rect, h).distance_squared(p) <= slop * slop)
+    }
+
+    for w in [0.0, 1.0, 7.0, 30.0] {
+      for h in [0.0, 1.0, 7.0, 30.0] {
+        let rect = Rect::new(10.0, 10.0, w, h);
+        for slop in [0.0, 1.0, 7.0, 20.0] {
+          for x in -8..=26 {
+            for y in -8..=26 {
+              let p = Point::new(x as f32, y as f32);
+              assert_eq!(
+                hit_handle(rect, p, slop),
+                scan(rect, p, slop),
+                "rect {rect:?} slop {slop} point {p:?}"
+              );
+            }
+          }
+        }
+      }
+    }
   }
 
   #[test]

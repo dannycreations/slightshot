@@ -36,11 +36,11 @@ use crate::{
     MIN_SIZE, PALETTE, SIZE_STEP, TOOLS,
   },
   capture,
-  geom::{hit_handle, resized, Handle, Point, Rect},
+  geom::{hit_handle, resized, Handle, Point, Rect, HANDLE_SLOP},
   hotkey::Trigger,
   layer::Layered,
   pixel::swap_channels_to_words,
-  render::{self, Backdrop, Chrome, Hotspot, Scene, HANDLE_SLOP},
+  render::{self, Backdrop, Chrome, Hotspot, Scene},
   text::TextEngine,
 };
 
@@ -339,7 +339,7 @@ impl Session {
     };
 
     let frame = Pixmap::new(canvas.width(), canvas.height())
-      .expect("frame allocation failed");
+      .context("allocating the overlay frame failed")?;
 
     let (selection, tool) = opening(bounds, backdrop);
     let mut session = Self {
@@ -360,7 +360,7 @@ impl Session {
       cursor: Point::default(),
       raw_path: Vec::new(),
       hover: None,
-      chrome: Chrome::default(),
+      chrome: Chrome::new(backdrop),
       modifiers: ModifiersState::default(),
       sizes: TOOLS.map(Tool::default_size),
       hint: None,
@@ -517,12 +517,13 @@ impl Session {
       }
       Mode::Type(_, _) => {}
     }
-    match step {
-      None => {}
-      Some(Step::Repaint) => self.window.request_redraw(),
-      Some(Step::Segment(segment)) => {
-        self.ink_segment(segment);
-        self.window.request_redraw();
+    if let Some(step) = step {
+      match step {
+        Step::Repaint => self.window.request_redraw(),
+        Step::Segment(segment) => {
+          self.ink_segment(segment);
+          self.window.request_redraw();
+        }
       }
     }
   }

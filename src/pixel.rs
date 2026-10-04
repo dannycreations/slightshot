@@ -18,13 +18,8 @@ fn get_simd_level() -> u8 {
 }
 
 #[cfg(target_arch = "x86_64")]
-const fn alpha_lanes<const OPAQUE: bool>() -> [i8; 8] {
-  if OPAQUE {
-    [-128; 8]
-  } else {
-    [3, 7, 11, 15, 19, 23, 27, 31]
-  }
-}
+const BGRA_TO_RGBA: [i8; 16] =
+  [2, 1, 0, 3, 6, 5, 4, 7, 10, 9, 8, 11, 14, 13, 12, 15];
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
@@ -33,12 +28,12 @@ unsafe fn reorder_avx2<const OPAQUE: bool>(
   mut dst_ptr: *mut u8,
   count: usize,
 ) {
-  let lanes = alpha_lanes::<OPAQUE>();
-  let mask = _mm256_setr_epi8(
-    2, 1, 0, lanes[0], 6, 5, 4, lanes[1], 10, 9, 8, lanes[2], 14, 13, 12,
-    lanes[3], 2, 1, 0, lanes[4], 6, 5, 4, lanes[5], 10, 9, 8, lanes[6], 14, 13,
-    12, lanes[7],
-  );
+  // SAFETY: the mask is 16 bytes and is only read, so the load stays in
+  // bounds and needs no alignment.
+  let narrow = unsafe { _mm_loadu_si128(BGRA_TO_RGBA.as_ptr().cast()) };
+  // Both halves shuffle within themselves, so one copy of the mask serves the
+  // whole 32-byte register.
+  let mask = _mm256_broadcastsi128_si256(narrow);
   let seal = if OPAQUE {
     _mm256_set1_epi32(0xff00_0000_u32 as i32)
   } else {
@@ -83,11 +78,9 @@ unsafe fn reorder_ssse3<const OPAQUE: bool>(
   mut dst_ptr: *mut u8,
   count: usize,
 ) {
-  let lanes = alpha_lanes::<OPAQUE>();
-  let mask = _mm_setr_epi8(
-    2, 1, 0, lanes[0], 6, 5, 4, lanes[1], 10, 9, 8, lanes[2], 14, 13, 12,
-    lanes[3],
-  );
+  // SAFETY: the mask is 16 bytes and is only read, so the load stays in bounds
+  // and needs no alignment.
+  let mask = unsafe { _mm_loadu_si128(BGRA_TO_RGBA.as_ptr().cast()) };
   let seal = if OPAQUE {
     _mm_set1_epi32(0xff00_0000_u32 as i32)
   } else {
@@ -216,6 +209,35 @@ mod tests {
     swap_channels_to_words(&src, &mut words);
     assert_eq!(words[0].to_le_bytes(), [30, 20, 10, 255]);
     assert_eq!(words[1].to_le_bytes(), [60, 50, 40, 255]);
+  }
+
+  #[test]
+  fn both_swap_modes_agree_across_every_path() {
+    // A BGRA pixel becomes RGBA whichever path handles it: the avx2 loop, its
+    // 32-byte remainder, the ssse3 loop, its 16-byte remainder, or the scalar
+    // tail. Only `swap_channels` forces the alpha, so both modes are checked
+    // over lengths that straddle every boundary.
+    for len in [4usize, 16, 32, 48, 64, 160] {
+      let src: Vec<u8> = (0..len as u8).collect();
+      let mut opaque = vec![0u8; len];
+      swap_channels(&src, &mut opaque);
+      let mut kept = vec![0u8; len];
+      swap_channels_keeping_alpha(&src, &mut kept);
+      for (index, px) in src.as_chunks::<4>().0.iter().enumerate() {
+        let swapped = [px[2], px[1], px[0]];
+        let out = index * 4;
+        assert_eq!(
+          &opaque[out..out + 4],
+          &[swapped[0], swapped[1], swapped[2], 255],
+          "len {len} pixel {index}"
+        );
+        assert_eq!(
+          &kept[out..out + 4],
+          &[swapped[0], swapped[1], swapped[2], px[3]],
+          "len {len} pixel {index}"
+        );
+      }
+    }
   }
 
   #[test]
