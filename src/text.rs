@@ -3,7 +3,7 @@ use std::{
   collections::{hash_map::Entry, HashMap},
   env, fs,
   path::Path,
-  sync::{Arc, OnceLock},
+  sync::OnceLock,
 };
 
 use anyhow::{anyhow, Result};
@@ -21,9 +21,9 @@ struct GlyphInfo {
   len: u32,
 }
 
-static SYSTEM_FONT: OnceLock<Option<Arc<Font>>> = OnceLock::new();
+static SYSTEM_FONT: OnceLock<Option<Font>> = OnceLock::new();
 
-fn get_system_font() -> Option<Arc<Font>> {
+fn system_font() -> Option<&'static Font> {
   SYSTEM_FONT
     .get_or_init(|| {
       let windir =
@@ -40,23 +40,23 @@ fn get_system_font() -> Option<Arc<Font>> {
           load_substitutions: false,
         };
         if let Ok(font) = Font::from_bytes(bytes, settings) {
-          return Some(Arc::new(font));
+          return Some(font);
         }
       }
       None
     })
-    .clone()
+    .as_ref()
 }
 
 pub struct TextEngine {
-  font: Arc<Font>,
+  font: &'static Font,
   glyphs: RefCell<HashMap<(char, u32), GlyphInfo>>,
   atlas: RefCell<Vec<u8>>,
 }
 
 impl TextEngine {
   pub fn load() -> Result<Self> {
-    let font = get_system_font()
+    let font = system_font()
       .ok_or_else(|| anyhow!("no system font found under Windows\\Fonts"))?;
     Ok(Self {
       font,

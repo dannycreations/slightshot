@@ -128,31 +128,12 @@ impl Presenter {
   }
 }
 
-struct Ink {
-  canvas: Pixmap,
-  backdrop: Pixmap,
-}
-
-impl Ink {
-  fn fresh(canvas: &Pixmap, backdrop: &Pixmap) -> Self {
-    Self {
-      canvas: canvas.clone(),
-      backdrop: backdrop.clone(),
-    }
-  }
-
-  fn stamp(&mut self, engine: &TextEngine, shape: &Shape) {
-    render::ink(&mut self.canvas, shape, engine);
-    render::dimmed_into(&mut self.backdrop, &self.canvas);
-  }
-}
-
 struct Session {
   window: Arc<Window>,
   backdrop_kind: Backdrop,
+  base: Pixmap,
   canvas: Pixmap,
   backdrop: Pixmap,
-  ink: Option<Ink>,
   frame: Pixmap,
   presenter: Presenter,
   bounds: Rect,
@@ -232,11 +213,7 @@ impl ApplicationHandler<Trigger> for App {
         }
         match event.logical_key {
           Key::Named(NamedKey::Escape) => self.session = None,
-          Key::Named(NamedKey::Enter) => {
-            if let Some(outcome) = session.commit_label() {
-              self.finish(outcome);
-            }
-          }
+          Key::Named(NamedKey::Enter) => session.commit_label(),
           Key::Named(NamedKey::Backspace) => session.backspace(),
           Key::Character(ch) => {
             if let Some(outcome) = session.character(ch.as_str()) {
@@ -346,9 +323,9 @@ impl Session {
     let mut session = Self {
       window,
       backdrop_kind: backdrop,
+      base: canvas.clone(),
       canvas,
       backdrop: dimmed,
-      ink: None,
       frame,
       presenter,
       bounds,
@@ -401,35 +378,28 @@ impl Session {
       self.mode.shows_chrome(),
       self.backdrop_kind,
     );
-    let chrome = &self.chrome;
-    let (inked_backdrop, inked_canvas) = match &self.ink {
-      Some(ink) => (&ink.backdrop, &ink.canvas),
-      None => (&self.backdrop, &self.canvas),
-    };
-    let draft = self.mode.draft();
-    let typing = self
-      .mode
-      .typing()
-      .map(|(at, buffer)| (at, buffer, self.size(Tool::Label)));
-    let text = &self.engine;
-
+    let label_size = self.size(Tool::Label);
     let frame = &mut self.frame;
-    let scene = Scene {
-      inked_backdrop,
-      inked_canvas,
-      bounds: self.bounds,
-      selection: self.selection,
-      backdrop: self.backdrop_kind,
-      draft,
-      typing,
-      palette_index: self.palette_index,
-      chrome,
-      hotspot: self.hover,
-      text,
-      hint: self.hint.as_ref().map(|(text, _)| text.as_str()),
-    };
-
-    render::paint(frame, &scene);
+    render::paint(
+      frame,
+      &Scene {
+        backdrop: &self.backdrop,
+        canvas: &self.canvas,
+        bounds: self.bounds,
+        selection: self.selection,
+        kind: self.backdrop_kind,
+        draft: self.mode.draft(),
+        typing: self
+          .mode
+          .typing()
+          .map(|(at, buffer)| (at, buffer, label_size)),
+        palette_index: self.palette_index,
+        chrome: &self.chrome,
+        hotspot: self.hover,
+        text: &self.engine,
+        hint: self.hint.as_ref().map(|(text, _)| text.as_str()),
+      },
+    );
     self.presenter.present(&self.frame)
   }
 
@@ -489,32 +459,23 @@ impl Session {
         self.update_cursor(icon);
       }
       Mode::Rubber(anchor) => {
-        let new_sel = Rect::spanning(*anchor, p);
-        if self.selection != Some(new_sel) {
-          self.selection = Some(new_sel);
-          self.window.request_redraw();
-        }
+        let drawn = Rect::spanning(*anchor, p);
+        self.set_selection(drawn);
       }
       Mode::Draw(draft, anchor) => {
         step = extend_draft(*anchor, draft, p);
       }
       Mode::Move(last) => {
         let sel = self.selection.expect("move mode requires a selection");
-        let moved =
-          sel.moved_inside(self.bounds, Point::new(p.x - last.x, p.y - last.y));
-        if self.selection != Some(moved) {
-          self.selection = Some(moved);
-          self.window.request_redraw();
-        }
+        let delta = Point::new(p.x - last.x, p.y - last.y);
+        let moved = sel.moved_inside(self.bounds, delta);
         *last = p;
+        self.set_selection(moved);
       }
       Mode::Resize(handle, rect) => {
         let target = p.clamped_inside(self.bounds);
-        let resized_sel = resized(*rect, *handle, target);
-        if self.selection != Some(resized_sel) {
-          self.selection = Some(resized_sel);
-          self.window.request_redraw();
-        }
+        let dragged = resized(*rect, *handle, target);
+        self.set_selection(dragged);
       }
       Mode::Type(_, _) => {}
     }
@@ -526,6 +487,13 @@ impl Session {
           self.window.request_redraw();
         }
       }
+    }
+  }
+
+  fn set_selection(&mut self, sel: Rect) {
+    if self.selection != Some(sel) {
+      self.selection = Some(sel);
+      self.window.request_redraw();
     }
   }
 
@@ -612,7 +580,7 @@ impl Session {
       }
       render::Command::Undo => {
         if self.history.undo() {
-          self.rebuild_ink();
+          self.replay();
           self.window.request_redraw();
         }
         None
@@ -627,57 +595,27 @@ impl Session {
       return None;
     }
     let sel = render::deliverable_region(self.selection)?;
-    let source = self.ink.as_ref().map_or(&self.canvas, |ink| &ink.canvas);
     Some(Outcome::Deliver {
       deliverable,
-      shot: render::flatten(source, sel),
+      shot: render::flatten(&self.canvas, sel),
     })
   }
 
   fn ink_shape(&mut self, shape: &Shape) {
-    let Session {
-      canvas,
-      backdrop,
-      engine,
-      ink,
-      ..
-    } = self;
-    let ink = ink.get_or_insert_with(|| Ink::fresh(canvas, backdrop));
-    ink.stamp(engine, shape);
+    render::ink(&mut self.canvas, shape, &self.engine);
+    render::dimmed_into(&mut self.backdrop, &self.canvas);
   }
 
   fn ink_segment(&mut self, segment: Segment) {
-    let Session {
-      canvas,
-      backdrop,
-      ink,
-      ..
-    } = self;
-    let ink = ink.get_or_insert_with(|| Ink::fresh(canvas, backdrop));
-    render::ink_segment(&mut ink.canvas, &mut ink.backdrop, segment);
+    render::ink_segment(&mut self.canvas, &mut self.backdrop, segment);
   }
 
-  fn rebuild_ink(&mut self) {
-    let Session {
-      canvas,
-      backdrop,
-      engine,
-      history,
-      ink,
-      ..
-    } = self;
-    if history.shapes().is_empty() {
-      // Nothing survives to replay, so release both buffers rather than hold
-      // two full-screen copies for an empty history.
-      *ink = None;
-      return;
+  fn replay(&mut self) {
+    self.canvas.data_mut().copy_from_slice(self.base.data());
+    for shape in self.history.shapes() {
+      render::ink(&mut self.canvas, shape, &self.engine);
     }
-    let ink = ink.get_or_insert_with(|| Ink::fresh(canvas, backdrop));
-    ink.canvas.data_mut().copy_from_slice(canvas.data());
-    for shape in history.shapes() {
-      render::ink(&mut ink.canvas, shape, engine);
-    }
-    render::dimmed_into(&mut ink.backdrop, &ink.canvas);
+    render::dimmed_into(&mut self.backdrop, &self.canvas);
   }
 
   fn mouse_up(&mut self) {
@@ -707,7 +645,7 @@ impl Session {
     if ch.eq_ignore_ascii_case("c") && self.modifiers.control_key() {
       return self.deliver(Deliverable::Copy);
     }
-    if !self.is_typing() && matches!(ch, "[" | "]") {
+    if self.mode.typing().is_none() && matches!(ch, "[" | "]") {
       let step = if ch == "]" { SIZE_STEP } else { -SIZE_STEP };
       self.adjust_size(step);
       return None;
@@ -730,31 +668,27 @@ impl Session {
     }
   }
 
-  fn commit_label(&mut self) -> Option<Outcome> {
-    if let Mode::Type(buffer, anchor) = &mut self.mode {
-      let text = Shape::Caption {
-        at: *anchor,
-        text: mem::take(buffer),
-        color: active_color(self.palette_index),
-        size: self.size(Tool::Label),
-      };
-      if text.is_complete() {
-        self.ink_shape(&text);
-        self.history.push(text);
-      }
-      self.mode = Mode::Idle;
-      self.window.request_redraw();
+  fn commit_label(&mut self) {
+    let Mode::Type(buffer, anchor) = &mut self.mode else {
+      return;
+    };
+    let label = Shape::Caption {
+      at: *anchor,
+      text: mem::take(buffer),
+      color: active_color(self.palette_index),
+      size: self.size(Tool::Label),
+    };
+    if label.is_complete() {
+      self.ink_shape(&label);
+      self.history.push(label);
     }
-    None
+    self.mode = Mode::Idle;
+    self.window.request_redraw();
   }
 
   #[inline(always)]
   fn size(&self, tool: Tool) -> f32 {
     self.sizes[tool as usize]
-  }
-
-  fn is_typing(&self) -> bool {
-    matches!(self.mode, Mode::Type(_, _))
   }
 
   fn adjust_size(&mut self, delta: f32) {

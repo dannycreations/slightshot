@@ -174,19 +174,14 @@ pub fn build(
   }
 }
 
+fn under(buttons: &[Button], p: Point) -> Option<usize> {
+  buttons.iter().position(|b| b.shown() && b.area.contains(p))
+}
+
 pub fn hotspot_at(chrome: &Chrome, p: Point) -> Option<Hotspot> {
-  chrome
-    .tools
-    .iter()
-    .position(|b| b.shown() && b.area.contains(p))
+  under(&chrome.tools, p)
     .map(Hotspot::Tool)
-    .or_else(|| {
-      chrome
-        .actions
-        .iter()
-        .position(|b| b.shown() && b.area.contains(p))
-        .map(Hotspot::Action)
-    })
+    .or_else(|| under(&chrome.actions, p).map(Hotspot::Action))
 }
 
 #[derive(Clone, Copy)]
@@ -197,51 +192,51 @@ enum Panel {
 
 fn layout_panel(buttons: &mut [Button], sel: Rect, bounds: Rect, panel: Panel) {
   let count = buttons.len() as f32;
+  let long = count * BUTTON + (count - 1.0) * TOOL_GAP + PANEL_PAD * 2.0;
+  let short = BUTTON + PANEL_PAD * 2.0;
+
+  let Panel::Column { live } = panel else {
+    let (width, height) = (long, short);
+    let x = (sel.right() - width).max(bounds.x);
+    let mut y = sel.bottom() + ROW_GAP;
+    if y + height > bounds.bottom() {
+      y = sel.y - height - ROW_GAP;
+    }
+    let y = clamp_span(y, height, bounds.y, bounds.bottom());
+    lay_out_buttons(buttons, (x, y), Panel::Row);
+    return;
+  };
+
+  let (width, height) = (short, long);
+  let mut x = sel.right() + COLUMN_GAP;
+  if x + width > bounds.right() {
+    x = sel.right() - width - COLUMN_GAP;
+  }
+  let x = clamp_span(x, width, bounds.x, bounds.right());
+  let y = if live {
+    clamp_span(
+      sel.center().y - height * 0.5,
+      height,
+      bounds.y + SCREEN_MARGIN,
+      bounds.bottom() - SCREEN_MARGIN,
+    )
+  } else {
+    (sel.bottom() - height).clamp(
+      bounds.y + SCREEN_MARGIN,
+      (bounds.bottom() - height - SCREEN_MARGIN).max(bounds.y),
+    )
+  };
+  lay_out_buttons(buttons, (x, y), Panel::Column { live });
+}
+
+fn lay_out_buttons(buttons: &mut [Button], at: (f32, f32), panel: Panel) {
   let step = BUTTON + TOOL_GAP;
-  let main = count * BUTTON + (count - 1.0) * TOOL_GAP + PANEL_PAD * 2.0;
-  let cross = BUTTON + PANEL_PAD * 2.0;
-  let (width, height) = match panel {
-    Panel::Column { .. } => (cross, main),
-    Panel::Row => (main, cross),
-  };
-
-  let (x, y) = match panel {
-    Panel::Column { live } => {
-      let mut x = sel.right() + COLUMN_GAP;
-      if x + width > bounds.right() {
-        x = sel.right() - width - COLUMN_GAP;
-      }
-      x = clamp_span(x, width, bounds.x, bounds.right());
-      let y = if live {
-        clamp_span(
-          sel.center().y - height * 0.5,
-          height,
-          bounds.y + SCREEN_MARGIN,
-          bounds.bottom() - SCREEN_MARGIN,
-        )
-      } else {
-        (sel.bottom() - height).clamp(
-          bounds.y + SCREEN_MARGIN,
-          (bounds.bottom() - height - SCREEN_MARGIN).max(bounds.y),
-        )
-      };
-      (x, y)
-    }
-    Panel::Row => {
-      let x = (sel.right() - width).max(bounds.x);
-      let mut y = sel.bottom() + ROW_GAP;
-      if y + height > bounds.bottom() {
-        y = sel.y - height - ROW_GAP;
-      }
-      let y = clamp_span(y, height, bounds.y, bounds.bottom());
-      (x, y)
-    }
-  };
-
+  let (x, y) = at;
   for (index, button) in buttons.iter_mut().enumerate() {
+    let offset = index as f32 * step;
     let (dx, dy) = match panel {
-      Panel::Column { .. } => (0.0, index as f32 * step),
-      Panel::Row => (index as f32 * step, 0.0),
+      Panel::Column { .. } => (0.0, offset),
+      Panel::Row => (offset, 0.0),
     };
     button.area =
       Rect::new(x + PANEL_PAD + dx, y + PANEL_PAD + dy, BUTTON, BUTTON);
@@ -249,11 +244,11 @@ fn layout_panel(buttons: &mut [Button], sel: Rect, bounds: Rect, panel: Panel) {
 }
 
 pub struct Scene<'a> {
-  pub inked_backdrop: &'a Pixmap,
-  pub inked_canvas: &'a Pixmap,
+  pub backdrop: &'a Pixmap,
+  pub canvas: &'a Pixmap,
   pub bounds: Rect,
   pub selection: Option<Rect>,
-  pub backdrop: Backdrop,
+  pub kind: Backdrop,
   pub draft: Option<&'a Shape>,
   pub typing: Option<(Point, &'a str, f32)>,
   pub palette_index: usize,
@@ -264,7 +259,7 @@ pub struct Scene<'a> {
 }
 
 pub fn paint(pm: &mut Pixmap, scene: &Scene) {
-  pm.data_mut().copy_from_slice(scene.inked_backdrop.data());
+  pm.data_mut().copy_from_slice(scene.backdrop.data());
   let Some(sel) = scene.selection else {
     draw_live(pm, scene);
     return;
@@ -274,12 +269,12 @@ pub fn paint(pm: &mut Pixmap, scene: &Scene) {
     return;
   }
   let at = (x0, y0);
-  copy_region(pm, scene.inked_canvas, at, at, (width, height));
+  copy_region(pm, scene.canvas, at, at, (width, height));
   draw_live(pm, scene);
   // An area the user picked can be adjusted, so it gets the outline and the
   // handles that say so. A live overlay's area is the window itself and cannot
   // be adjusted, so those would only promise something that is not there.
-  if scene.backdrop.picks_region() {
+  if scene.kind.picks_region() {
     draw::dashed_rect(pm, sel, [255, 255, 255]);
     draw_handles(pm, sel);
     draw_badge(pm, sel, scene.bounds, scene.text);
@@ -317,11 +312,10 @@ fn dim_pixel(dst: &mut [u8], src: &[u8]) {
 }
 
 pub fn dimmed_into(dst: &mut Pixmap, src: &Pixmap) {
-  let dst_pixels = dst.data_mut().as_chunks_mut::<4>().0;
-  let src_pixels = src.data().as_chunks::<4>().0;
-  for (dst_px, src_px) in dst_pixels.iter_mut().zip(src_pixels) {
-    dim_pixel(dst_px, src_px);
-  }
+  let width = src.width().min(dst.width());
+  let height = src.height().min(dst.height());
+  let whole = Rect::new(0.0, 0.0, width as f32, height as f32);
+  dim_region_into(dst, src, whole);
 }
 
 fn dim_region_into(dst: &mut Pixmap, src: &Pixmap, rect: Rect) {
@@ -1177,11 +1171,11 @@ mod tests {
     let mut pm = backdrop.clone();
 
     let scene = Scene {
-      inked_backdrop: &backdrop,
-      inked_canvas: &canvas,
+      backdrop: &backdrop,
+      canvas: &canvas,
       bounds,
       selection,
-      backdrop: Backdrop::Frozen,
+      kind: Backdrop::Frozen,
       draft: Some(&draft),
       typing: None,
       palette_index: 0,

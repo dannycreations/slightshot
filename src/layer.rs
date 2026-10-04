@@ -88,11 +88,11 @@ impl Layered {
 
   fn ensure_layered(&self) -> Result<()> {
     let layered = WS_EX_LAYERED.0 as isize;
-    // SAFETY: both calls only read and write this window's own extended style,
-    // and the window outlives this struct.
+    // SAFETY: every call only reads or writes this window's own extended
+    // style, and the window outlives this struct.
     unsafe {
-      if GetWindowLongPtrW(self.window, GWL_EXSTYLE) & layered == 0 {
-        let style = GetWindowLongPtrW(self.window, GWL_EXSTYLE);
+      let style = GetWindowLongPtrW(self.window, GWL_EXSTYLE);
+      if style & layered == 0 {
         SetWindowLongPtrW(self.window, GWL_EXSTYLE, style | layered);
         if GetWindowLongPtrW(self.window, GWL_EXSTYLE) & layered == 0 {
           bail!(

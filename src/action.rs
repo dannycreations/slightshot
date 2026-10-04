@@ -97,8 +97,7 @@ fn write_png<W: Write>(shot: &Shot, writer: W) -> Result<()> {
 }
 
 fn png_bytes(shot: &Shot) -> Result<Vec<u8>> {
-  let capacity = (shot.rgba.len() / 4).max(4096);
-  let mut buffer = Vec::with_capacity(capacity);
+  let mut buffer = Vec::new();
   write_png(shot, &mut buffer)?;
   Ok(buffer)
 }
