@@ -135,7 +135,10 @@ impl Shape {
       Shape::Line { width, .. } | Shape::Outline { width, .. } => {
         *width = new_width
       }
-      Shape::Stroke { .. } | Shape::Caption { .. } => {}
+      Shape::Stroke { .. } => {}
+      Shape::Caption { .. } => {
+        unreachable!("a caption carries its own size, not a stroke width")
+      }
     }
   }
 

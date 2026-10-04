@@ -179,15 +179,15 @@ impl Presenter {
 }
 
 fn damage_of(area: Rect) -> Damage {
-  let x = area.x.floor().max(0.0) as u32;
-  let y = area.y.floor().max(0.0) as u32;
-  let width = (area.w.ceil() as u32).max(1);
-  let height = (area.h.ceil() as u32).max(1);
+  // `MIN` is 1, so the fallback already floors a box that rounded down to
+  // nothing. softbuffer rejects a rect with a zero side.
   Damage {
-    x,
-    y,
-    width: NonZeroU32::new(width).unwrap_or(NonZeroU32::MIN),
-    height: NonZeroU32::new(height).unwrap_or(NonZeroU32::MIN),
+    // A float to integer cast saturates, so a negative origin and a NaN both
+    // land on 0 here without a clamp.
+    x: area.x.floor() as u32,
+    y: area.y.floor() as u32,
+    width: NonZeroU32::new(area.w.ceil() as u32).unwrap_or(NonZeroU32::MIN),
+    height: NonZeroU32::new(area.h.ceil() as u32).unwrap_or(NonZeroU32::MIN),
   }
 }
 
@@ -972,7 +972,7 @@ fn extend_draft(anchor: Point, draft: &mut Shape, p: Point) -> Option<Step> {
       points.push(p);
       Some(Step::Segment(segment))
     }
-    Shape::Line { to, .. } | Shape::Caption { at: to, .. } => {
+    Shape::Line { to, .. } => {
       if *to == p {
         return None;
       }
@@ -986,6 +986,9 @@ fn extend_draft(anchor: Point, draft: &mut Shape, p: Point) -> Option<Step> {
       }
       *rect = new_rect;
       Some(Step::Repaint)
+    }
+    Shape::Caption { .. } => {
+      unreachable!("a label is typed in Mode::Type, never dragged as a draft")
     }
   }
 }

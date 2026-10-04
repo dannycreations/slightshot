@@ -25,6 +25,7 @@ const ICON_BOX: f32 = 18.0;
 const TOOLTIP_TEXT: f32 = 14.0;
 const TOOLTIP_PAD: f32 = 5.0;
 const TOOLTIP_GAP: f32 = 6.0;
+const CARET_WIDTH: f32 = 1.5;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Backdrop {
@@ -134,6 +135,24 @@ impl Chrome {
       Some(Hotspot::Action(i)) => self.actions.get(i).map(|b| (b, Side::Above)),
       None => None,
     }
+  }
+
+  fn tooltips<'a>(
+    &'a self,
+    hotspot: Option<Hotspot>,
+    hint: Option<&'a str>,
+  ) -> impl Iterator<Item = (Rect, &'a str, Side)> {
+    let hovered = self
+      .hovered(hotspot)
+      .map(|(button, side)| (button.area, button.command.label(), side));
+    let raised = hint.and_then(|hint| {
+      self
+        .tools
+        .iter()
+        .find(|button| button.active)
+        .map(|button| (button.area, hint, Side::Left))
+    });
+    hovered.into_iter().chain(raised)
   }
 }
 
@@ -298,10 +317,13 @@ impl Shown {
       area = area.union(region_area(self.selection, bounds, engine));
       area = area.union(region_area(next.selection, bounds, engine));
     }
-    if self.chrome != next.chrome
+    // A new colour repaints the panels as well, because the swatch on the
+    // colour button is the one thing on them that takes it.
+    let panels_moved = self.chrome != next.chrome
       || self.hotspot != next.hotspot
       || self.hint != next.hint
-    {
+      || self.palette != next.palette;
+    if panels_moved {
       area = area.union(self.panels_area(bounds, engine));
       area = area.union(next.panels_area(bounds, engine));
     }
@@ -309,15 +331,8 @@ impl Shown {
       area = area.union(shape_area(self.draft.as_ref(), engine));
       area = area.union(shape_area(next.draft.as_ref(), engine));
     }
-    if self.typing != next.typing {
-      area = area.union(typed_area(self.typed(), engine));
-      area = area.union(typed_area(next.typed(), engine));
-    }
-    if self.palette != next.palette {
-      // The swatch on the colour button and the text being typed are the only
-      // two things that take the active colour.
-      area = area.union(self.panels_area(bounds, engine));
-      area = area.union(next.panels_area(bounds, engine));
+    // The text being typed is the other thing that takes the active colour.
+    if self.typing != next.typing || self.palette != next.palette {
       area = area.union(typed_area(self.typed(), engine));
       area = area.union(typed_area(next.typed(), engine));
     }
@@ -375,22 +390,16 @@ fn panels_area(
 ) -> Rect {
   let mut area = Rect::ZERO;
   for button in chrome.tools.iter().chain(&chrome.actions) {
-    area = area.union(button.area.inflated(EDGE));
-  }
-  if let Some((button, side)) = chrome.hovered(hotspot) {
-    area = area.union(tooltip_rect(
-      button.area,
-      button.command.label(),
-      bounds,
-      engine,
-      side,
-    ));
-  }
-  if let Some(hint) = hint {
-    if let Some(button) = chrome.tools.iter().find(|b| b.active) {
-      area =
-        area.union(tooltip_rect(button.area, hint, bounds, engine, Side::Left));
+    // A button that was never laid out sits on `Rect::ZERO`, which is how the
+    // chrome says "no button here". Inflating that sentinel would turn it
+    // into a live box at the origin, and the union would then stretch every
+    // repaint back to the top left of the screen.
+    if button.shown() {
+      area = area.union(button.area.inflated(EDGE));
     }
+  }
+  for (at, label, side) in chrome.tooltips(hotspot, hint) {
+    area = area.union(tooltip_rect(at, label, bounds, engine, side));
   }
   area
 }
@@ -429,13 +438,15 @@ pub fn shape_area(shape: Option<&Shape>, engine: &TextEngine) -> Rect {
 fn typed_area(typing: Option<(Point, &str, f32)>, engine: &TextEngine) -> Rect {
   match typing {
     Some((at, buffer, size)) => {
-      let caret = at.x + engine.width(buffer, size);
-      engine.inked(buffer, at, size).union(Rect::new(
-        caret,
-        at.y,
-        2.0,
-        size + 2.0,
-      ))
+      let x = at.x + engine.width(buffer, size);
+      // The caret is a round-capped stroke, so like every other stroke it
+      // paints half its width past each end, the one above the anchor
+      // included, plus the antialiased pixel outside that. A box that stops at
+      // the anchor would leave every cap behind as the caret steps right.
+      let caret =
+        Rect::spanning(Point::new(x, at.y), Point::new(x, at.y + size))
+          .inflated(CARET_WIDTH * 0.5 + 1.0);
+      engine.inked(buffer, at, size).union(caret)
     }
     None => Rect::ZERO,
   }
@@ -539,7 +550,7 @@ pub fn paint(pm: &mut Pixmap, scene: &Scene, damage: Rect) {
         pm,
         &[Point::new(caret_x, at.y), Point::new(caret_x, at.y + size)],
         [255, 255, 255],
-        1.5,
+        CARET_WIDTH,
         255,
       );
     }
@@ -747,9 +758,12 @@ fn handle_square(sel: Rect, handle: Handle) -> Rect {
   Rect::new(anchor.x - 3.0, anchor.y - 3.0, 6.0, 6.0)
 }
 
+fn badge_label(sel: Rect) -> String {
+  format!("{}x{}", sel.w.round() as i64, sel.h.round() as i64)
+}
+
 fn badge_rect(sel: Rect, bounds: Rect, engine: &TextEngine) -> Rect {
-  let label = format!("{}x{}", sel.w.round() as i64, sel.h.round() as i64);
-  let box_w = engine.width(&label, BADGE_TEXT) + BADGE_PAD * 2.0;
+  let box_w = engine.width(&badge_label(sel), BADGE_TEXT) + BADGE_PAD * 2.0;
   let mut bx = sel.x;
   let mut by = sel.y - BADGE_H - BADGE_GAP;
   if by < bounds.y {
@@ -760,7 +774,7 @@ fn badge_rect(sel: Rect, bounds: Rect, engine: &TextEngine) -> Rect {
 }
 
 fn draw_badge(pm: &mut Pixmap, sel: Rect, bounds: Rect, engine: &TextEngine) {
-  let label = format!("{}x{}", sel.w.round() as i64, sel.h.round() as i64);
+  let label = badge_label(sel);
   let plate = badge_rect(sel, bounds, engine);
   draw::rounded_fill(pm, plate, 4.0, [10, 10, 10], 210);
   engine.draw(
@@ -784,20 +798,8 @@ fn draw_panels(pm: &mut Pixmap, scene: &Scene) {
     draw_button(pm, button, hovered, swatch);
   }
 
-  if let Some((button, side)) = scene.chrome.hovered(scene.hotspot) {
-    draw_tooltip(
-      pm,
-      button.area,
-      button.command.label(),
-      scene.bounds,
-      scene.text,
-      side,
-    );
-  }
-  if let Some(text) = scene.hint {
-    if let Some(button) = scene.chrome.tools.iter().find(|b| b.active) {
-      draw_tooltip(pm, button.area, text, scene.bounds, scene.text, Side::Left);
-    }
+  for (at, label, side) in scene.chrome.tooltips(scene.hotspot, scene.hint) {
+    draw_tooltip(pm, at, label, scene.bounds, scene.text, side);
   }
 }
 
@@ -1693,6 +1695,73 @@ mod tests {
     assert!(
       area.contains_rect(new_chrome.tools[0].area),
       "and the panels that moved in, got {area:?}"
+    );
+  }
+
+  #[test]
+  fn the_caret_paints_inside_the_damage_box_reserved_for_it() {
+    // The caret is a round-capped stroke, so it reaches half its width above
+    // the anchor. Whatever it paints outside the typed area never gets
+    // repainted, so it would sit there for the rest of the session.
+    let Ok(engine) = TextEngine::load() else {
+      return;
+    };
+    let bounds = Rect::new(0.0, 0.0, 200.0, 120.0);
+    let canvas = Pixmap::new(200, 120).unwrap();
+    let backdrop = dimmed(&canvas);
+    let mut chrome = Chrome::new(Backdrop::Frozen);
+    build(
+      &mut chrome,
+      None,
+      bounds,
+      Tool::Label,
+      &History::default(),
+      true,
+      Backdrop::Frozen,
+    );
+    // Nothing typed yet and no region picked, so the caret is the only thing
+    // the paint can put on screen.
+    let at = Point::new(100.0, 70.0);
+    let mut scene =
+      scene_of((200, 120), &canvas, &backdrop, &chrome, &engine, None);
+    scene.typing = Some((at, "", 20.0));
+
+    let mut pm = Pixmap::new(200, 120).unwrap();
+    paint(&mut pm, &scene, bounds);
+
+    let area = typed_area(scene.typing, &engine);
+    for (index, pixel) in pm.data().as_chunks::<4>().0.iter().enumerate() {
+      if pixel[3] == 0 {
+        continue;
+      }
+      let x = (index % 200) as f32;
+      let y = (index / 200) as f32;
+      assert!(
+        area.contains(Point::new(x, y)),
+        "the caret lit ({x}, {y}), outside the {area:?} it reserved"
+      );
+    }
+  }
+
+  #[test]
+  fn an_unlaid_out_panel_damages_nothing() {
+    // `Rect::ZERO` is how the chrome says "no button here". Inflating that
+    // sentinel would make it a live box at the origin, and every union with a
+    // real region would then reach back across the screen to the corner.
+    let Ok(engine) = TextEngine::load() else {
+      return;
+    };
+    let chrome = Chrome::new(Backdrop::Live);
+    let area = panels_area(
+      &chrome,
+      None,
+      None,
+      Rect::new(0.0, 0.0, 400.0, 400.0),
+      &engine,
+    );
+    assert!(
+      area.is_empty(),
+      "no button is laid out, so the panel claims no ground, got {area:?}"
     );
   }
 

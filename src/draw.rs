@@ -13,10 +13,12 @@ fn skia_rect(rect: Rect) -> Option<SkRect> {
 }
 
 #[inline(always)]
-fn paint(r: u8, g: u8, b: u8, a: u8) -> Paint<'static> {
+fn paint(rgb: [u8; 3], alpha: u8) -> Paint<'static> {
   Paint {
     anti_alias: true,
-    shader: Shader::SolidColor(Color::from_rgba8(r, g, b, a)),
+    shader: Shader::SolidColor(Color::from_rgba8(
+      rgb[0], rgb[1], rgb[2], alpha,
+    )),
     ..Paint::default()
   }
 }
@@ -51,7 +53,7 @@ pub fn polyline(
   };
   pm.stroke_path(
     &path,
-    &paint(rgb[0], rgb[1], rgb[2], alpha),
+    &paint(rgb, alpha),
     &stroke(width),
     Transform::identity(),
     None,
@@ -105,7 +107,7 @@ pub fn arrow_head(
   if let Some(path) = builder.finish() {
     pm.fill_path(
       &path,
-      &paint(color[0], color[1], color[2], alpha),
+      &paint(color, alpha),
       FillRule::Winding,
       Transform::identity(),
       None,
@@ -125,7 +127,7 @@ pub fn rect_stroke(
   };
   pm.stroke_path(
     &path,
-    &paint(rgb[0], rgb[1], rgb[2], alpha),
+    &paint(rgb, alpha),
     &stroke(width),
     Transform::identity(),
     None,
@@ -137,12 +139,7 @@ pub fn rect_fill(pm: &mut Pixmap, rect: Rect, rgb: [u8; 3], alpha: u8) {
   let Some(r) = skia_rect(rect) else {
     return;
   };
-  pm.fill_rect(
-    r,
-    &paint(rgb[0], rgb[1], rgb[2], alpha),
-    Transform::identity(),
-    None,
-  );
+  pm.fill_rect(r, &paint(rgb, alpha), Transform::identity(), None);
 }
 
 pub fn dashed_rect(pm: &mut Pixmap, rect: Rect, rgb: [u8; 3]) {
@@ -156,13 +153,7 @@ pub fn dashed_rect(pm: &mut Pixmap, rect: Rect, rgb: [u8; 3]) {
     dash: StrokeDash::new(vec![3.0, 3.0], 0.0),
     ..stroke(1.0)
   });
-  pm.stroke_path(
-    &path,
-    &paint(rgb[0], rgb[1], rgb[2], 255),
-    dash,
-    Transform::identity(),
-    None,
-  );
+  pm.stroke_path(&path, &paint(rgb, 255), dash, Transform::identity(), None);
 }
 
 fn round_rect_path(r: SkRect, radius: f32) -> Option<Path> {
@@ -198,7 +189,7 @@ pub fn rounded_fill(
   };
   pm.fill_path(
     &path,
-    &paint(rgb[0], rgb[1], rgb[2], alpha),
+    &paint(rgb, alpha),
     FillRule::Winding,
     Transform::identity(),
     None,
@@ -218,7 +209,7 @@ pub fn rounded_stroke(
   };
   pm.stroke_path(
     &path,
-    &paint(rgb[0], rgb[1], rgb[2], alpha),
+    &paint(rgb, alpha),
     &stroke(width),
     Transform::identity(),
     None,
@@ -226,6 +217,7 @@ pub fn rounded_stroke(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[repr(usize)]
 pub enum Icon {
   Pen = 0,
   Marker,
@@ -241,6 +233,8 @@ pub enum Icon {
 }
 
 impl Icon {
+  const COUNT: usize = 11;
+
   pub fn paint(
     self,
     pm: &mut Pixmap,
@@ -312,7 +306,8 @@ fn render_tinted_sprite(
   });
 }
 
-static SPRITE_CACHE: [OnceLock<Pixmap>; 11] = [const { OnceLock::new() }; 11];
+static SPRITE_CACHE: [OnceLock<Pixmap>; Icon::COUNT] =
+  [const { OnceLock::new() }; Icon::COUNT];
 
 fn sprite(icon: Icon) -> &'static Pixmap {
   SPRITE_CACHE[icon as usize].get_or_init(|| {
