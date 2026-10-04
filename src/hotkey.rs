@@ -1,18 +1,50 @@
 use std::{sync::mpsc, thread};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{bail, Context, Result};
 use windows::Win32::UI::{
-  Input::KeyboardAndMouse::{RegisterHotKey, MOD_NOREPEAT, VK_NUMPAD8},
+  Input::KeyboardAndMouse::{
+    RegisterHotKey, MOD_NOREPEAT, VIRTUAL_KEY, VK_NUMPAD8, VK_NUMPAD9,
+  },
   WindowsAndMessaging::{GetMessageW, MSG, WM_HOTKEY},
 };
 use winit::event_loop::EventLoopProxy;
 
-const HOTKEY_ID: i32 = 1;
-
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Trigger {
   Capture,
+  Live,
   Quit,
+}
+
+struct Key {
+  id: i32,
+  vkey: VIRTUAL_KEY,
+  name: &'static str,
+  trigger: Trigger,
+}
+
+const KEYS: [Key; 2] = [
+  Key {
+    id: 1,
+    vkey: VK_NUMPAD8,
+    name: "Numpad 8",
+    trigger: Trigger::Capture,
+  },
+  Key {
+    id: 2,
+    vkey: VK_NUMPAD9,
+    name: "Numpad 9",
+    trigger: Trigger::Live,
+  },
+];
+
+impl Key {
+  fn trigger_for(id: usize) -> Option<Trigger> {
+    KEYS
+      .iter()
+      .find(|key| key.id as usize == id)
+      .map(|key| key.trigger)
+  }
 }
 
 pub fn spawn(proxy: EventLoopProxy<Trigger>) -> Result<()> {
@@ -34,20 +66,23 @@ pub fn spawn(proxy: EventLoopProxy<Trigger>) -> Result<()> {
 }
 
 fn register() -> Result<()> {
-  // SAFETY: a null window handle makes the system post WM_HOTKEY to this
-  // thread's own queue, which the watcher below drains; the id and key are
-  // constants owned by this thread for the process lifetime.
-  unsafe {
-    RegisterHotKey(None, HOTKEY_ID, MOD_NOREPEAT, u32::from(VK_NUMPAD8.0))
+  for key in KEYS {
+    // SAFETY: a null window handle makes the system post WM_HOTKEY to this
+    // thread's own queue, which the watcher below drains; the id and key are
+    // constants owned by this thread for the process lifetime.
+    if let Err(error) = unsafe {
+      RegisterHotKey(None, key.id, MOD_NOREPEAT, u32::from(key.vkey.0))
+    } {
+      bail!(
+        "{} could not be registered as a global hotkey ({error}). \
+         Another program may already own that key, or another slightshot \
+         instance is running. Close or reconfigure that owner, then start \
+         slightshot again.",
+        key.name
+      );
+    }
   }
-  .map_err(|error| {
-    anyhow!(
-      "Numpad 8 could not be registered as a global hotkey ({error}). \
-       Another program may already own that key, or another slightshot \
-       instance is running. Close or reconfigure that owner, then start \
-       slightshot again."
-    )
-  })
+  Ok(())
 }
 
 fn watch(proxy: EventLoopProxy<Trigger>) {
@@ -59,11 +94,31 @@ fn watch(proxy: EventLoopProxy<Trigger>) {
     if !received.as_bool() {
       return;
     }
-    if message.message == WM_HOTKEY
-      && message.wParam.0 == HOTKEY_ID as usize
-      && proxy.send_event(Trigger::Capture).is_err()
-    {
-      return;
+    if message.message == WM_HOTKEY {
+      if let Some(trigger) = Key::trigger_for(message.wParam.0) {
+        if proxy.send_event(trigger).is_err() {
+          return;
+        }
+      }
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn numpad_8_snapshots_and_numpad_9_draws_live() {
+    let found = KEYS
+      .iter()
+      .map(|key| (key.name, key.trigger))
+      .collect::<Vec<_>>();
+    assert_eq!(
+      found,
+      vec![("Numpad 8", Trigger::Capture), ("Numpad 9", Trigger::Live),]
+    );
+    assert_eq!(Key::trigger_for(2), Some(Trigger::Live));
+    assert_eq!(Key::trigger_for(99), None);
   }
 }

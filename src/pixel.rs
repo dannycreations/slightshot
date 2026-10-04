@@ -18,17 +18,32 @@ fn get_simd_level() -> u8 {
 }
 
 #[cfg(target_arch = "x86_64")]
+const fn alpha_lanes<const OPAQUE: bool>() -> [i8; 8] {
+  if OPAQUE {
+    [-128; 8]
+  } else {
+    [3, 7, 11, 15, 19, 23, 27, 31]
+  }
+}
+
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-unsafe fn swap_channels_avx2(
+unsafe fn reorder_avx2<const OPAQUE: bool>(
   mut src_ptr: *const u8,
   mut dst_ptr: *mut u8,
   count: usize,
 ) {
+  let lanes = alpha_lanes::<OPAQUE>();
   let mask = _mm256_setr_epi8(
-    2, 1, 0, -128, 6, 5, 4, -128, 10, 9, 8, -128, 14, 13, 12, -128, 2, 1, 0,
-    -128, 6, 5, 4, -128, 10, 9, 8, -128, 14, 13, 12, -128,
+    2, 1, 0, lanes[0], 6, 5, 4, lanes[1], 10, 9, 8, lanes[2], 14, 13, 12,
+    lanes[3], 2, 1, 0, lanes[4], 6, 5, 4, lanes[5], 10, 9, 8, lanes[6], 14, 13,
+    12, lanes[7],
   );
-  let alpha = _mm256_set1_epi32(0xff00_0000_u32 as i32);
+  let seal = if OPAQUE {
+    _mm256_set1_epi32(0xff00_0000_u32 as i32)
+  } else {
+    _mm256_setzero_si256()
+  };
 
   let chunks128 = count / 128;
   for _ in 0..chunks128 {
@@ -37,10 +52,10 @@ unsafe fn swap_channels_avx2(
     let v2 = _mm256_loadu_si256(src_ptr.add(64) as *const __m256i);
     let v3 = _mm256_loadu_si256(src_ptr.add(96) as *const __m256i);
 
-    let r0 = _mm256_or_si256(_mm256_shuffle_epi8(v0, mask), alpha);
-    let r1 = _mm256_or_si256(_mm256_shuffle_epi8(v1, mask), alpha);
-    let r2 = _mm256_or_si256(_mm256_shuffle_epi8(v2, mask), alpha);
-    let r3 = _mm256_or_si256(_mm256_shuffle_epi8(v3, mask), alpha);
+    let r0 = _mm256_or_si256(_mm256_shuffle_epi8(v0, mask), seal);
+    let r1 = _mm256_or_si256(_mm256_shuffle_epi8(v1, mask), seal);
+    let r2 = _mm256_or_si256(_mm256_shuffle_epi8(v2, mask), seal);
+    let r3 = _mm256_or_si256(_mm256_shuffle_epi8(v3, mask), seal);
 
     _mm256_storeu_si256(dst_ptr as *mut __m256i, r0);
     _mm256_storeu_si256(dst_ptr.add(32) as *mut __m256i, r1);
@@ -54,7 +69,7 @@ unsafe fn swap_channels_avx2(
   let remainder32 = (count % 128) / 32;
   for _ in 0..remainder32 {
     let v = _mm256_loadu_si256(src_ptr as *const __m256i);
-    let r = _mm256_or_si256(_mm256_shuffle_epi8(v, mask), alpha);
+    let r = _mm256_or_si256(_mm256_shuffle_epi8(v, mask), seal);
     _mm256_storeu_si256(dst_ptr as *mut __m256i, r);
     src_ptr = src_ptr.add(32);
     dst_ptr = dst_ptr.add(32);
@@ -63,15 +78,21 @@ unsafe fn swap_channels_avx2(
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "ssse3")]
-unsafe fn swap_channels_ssse3(
+unsafe fn reorder_ssse3<const OPAQUE: bool>(
   mut src_ptr: *const u8,
   mut dst_ptr: *mut u8,
   count: usize,
 ) {
+  let lanes = alpha_lanes::<OPAQUE>();
   let mask = _mm_setr_epi8(
-    2, 1, 0, -128, 6, 5, 4, -128, 10, 9, 8, -128, 14, 13, 12, -128,
+    2, 1, 0, lanes[0], 6, 5, 4, lanes[1], 10, 9, 8, lanes[2], 14, 13, 12,
+    lanes[3],
   );
-  let alpha = _mm_set1_epi32(0xff00_0000_u32 as i32);
+  let seal = if OPAQUE {
+    _mm_set1_epi32(0xff00_0000_u32 as i32)
+  } else {
+    _mm_setzero_si128()
+  };
 
   let chunks64 = count / 64;
   for _ in 0..chunks64 {
@@ -80,10 +101,10 @@ unsafe fn swap_channels_ssse3(
     let v2 = _mm_loadu_si128(src_ptr.add(32) as *const __m128i);
     let v3 = _mm_loadu_si128(src_ptr.add(48) as *const __m128i);
 
-    let r0 = _mm_or_si128(_mm_shuffle_epi8(v0, mask), alpha);
-    let r1 = _mm_or_si128(_mm_shuffle_epi8(v1, mask), alpha);
-    let r2 = _mm_or_si128(_mm_shuffle_epi8(v2, mask), alpha);
-    let r3 = _mm_or_si128(_mm_shuffle_epi8(v3, mask), alpha);
+    let r0 = _mm_or_si128(_mm_shuffle_epi8(v0, mask), seal);
+    let r1 = _mm_or_si128(_mm_shuffle_epi8(v1, mask), seal);
+    let r2 = _mm_or_si128(_mm_shuffle_epi8(v2, mask), seal);
+    let r3 = _mm_or_si128(_mm_shuffle_epi8(v3, mask), seal);
 
     _mm_storeu_si128(dst_ptr as *mut __m128i, r0);
     _mm_storeu_si128(dst_ptr.add(16) as *mut __m128i, r1);
@@ -97,7 +118,7 @@ unsafe fn swap_channels_ssse3(
   let remainder16 = (count % 64) / 16;
   for _ in 0..remainder16 {
     let v = _mm_loadu_si128(src_ptr as *const __m128i);
-    let r = _mm_or_si128(_mm_shuffle_epi8(v, mask), alpha);
+    let r = _mm_or_si128(_mm_shuffle_epi8(v, mask), seal);
     _mm_storeu_si128(dst_ptr as *mut __m128i, r);
     src_ptr = src_ptr.add(16);
     dst_ptr = dst_ptr.add(16);
@@ -105,6 +126,14 @@ unsafe fn swap_channels_ssse3(
 }
 
 pub fn swap_channels(src: &[u8], dst: &mut [u8]) {
+  reorder::<true>(src, dst)
+}
+
+pub fn swap_channels_keeping_alpha(src: &[u8], dst: &mut [u8]) {
+  reorder::<false>(src, dst)
+}
+
+fn reorder<const OPAQUE: bool>(src: &[u8], dst: &mut [u8]) {
   let total_bytes = src.len().min(dst.len()) & !3;
   let mut processed = 0;
 
@@ -119,7 +148,7 @@ pub fn swap_channels(src: &[u8], dst: &mut [u8]) {
           // that fits inside both slices, so every load and store below stays
           // in bounds and the unaligned variants need no alignment.
           unsafe {
-            swap_channels_avx2(src.as_ptr(), dst.as_mut_ptr(), simd_bytes);
+            reorder_avx2::<OPAQUE>(src.as_ptr(), dst.as_mut_ptr(), simd_bytes);
           }
           processed = simd_bytes;
         }
@@ -130,7 +159,7 @@ pub fn swap_channels(src: &[u8], dst: &mut [u8]) {
           // SAFETY: same argument as the avx2 branch, with ssse3 and 16-byte
           // vectors.
           unsafe {
-            swap_channels_ssse3(src.as_ptr(), dst.as_mut_ptr(), simd_bytes);
+            reorder_ssse3::<OPAQUE>(src.as_ptr(), dst.as_mut_ptr(), simd_bytes);
           }
           processed = simd_bytes;
         }
@@ -148,10 +177,15 @@ pub fn swap_channels(src: &[u8], dst: &mut [u8]) {
     .zip(remaining_src.as_chunks::<4>().0)
   {
     let px = u32::from_ne_bytes(*chunk);
+    let alpha_byte = if OPAQUE {
+      0xFF00_0000
+    } else {
+      px & 0xFF00_0000
+    };
     let swapped = ((px & 0x00FF_0000) >> 16)
       | ((px & 0x0000_00FF) << 16)
       | (px & 0x0000_FF00)
-      | 0xFF00_0000;
+      | alpha_byte;
     *out = swapped.to_ne_bytes();
   }
 }
@@ -182,5 +216,31 @@ mod tests {
     swap_channels_to_words(&src, &mut words);
     assert_eq!(words[0].to_le_bytes(), [30, 20, 10, 255]);
     assert_eq!(words[1].to_le_bytes(), [60, 50, 40, 255]);
+  }
+
+  #[test]
+  fn swap_channels_keeping_alpha_leaves_alpha_alone() {
+    // A layered window is composited by this alpha, so forcing it opaque would
+    // turn the live overlay into a black screen.
+    let src = [10u8, 20, 30, 0, 40, 50, 60, 99];
+    let mut bytes = [0u8; 8];
+    swap_channels_keeping_alpha(&src, &mut bytes);
+    assert_eq!(bytes, [30, 20, 10, 0, 60, 50, 40, 99]);
+
+    // Forty bytes reach the vector paths, which take the alpha from the shuffle
+    // mask instead of the scalar mask, and every pixel has to agree.
+    let wide: Vec<u8> = (0..40u8).collect();
+    let mut out = [0u8; 40];
+    swap_channels_keeping_alpha(&wide, &mut out);
+    for (index, (got, px)) in out
+      .as_chunks::<4>()
+      .0
+      .iter()
+      .zip(wide.as_chunks::<4>().0)
+      .enumerate()
+    {
+      let want = [px[2], px[1], px[0], px[3]];
+      assert_eq!(*got, want, "pixel {index}");
+    }
   }
 }

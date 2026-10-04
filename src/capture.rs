@@ -17,9 +17,28 @@ use windows::Win32::{
 
 use crate::pixel::swap_channels;
 
-pub struct ScreenShot {
-  pub pixmap: Pixmap,
+#[derive(Clone, Copy, Debug)]
+pub struct Desktop {
   pub origin: (i32, i32),
+  pub size: (u32, u32),
+}
+
+pub fn desktop() -> Result<Desktop> {
+  // SAFETY: GetSystemMetrics reads display settings through constants and
+  // touches nothing this process owns, so there is no state to keep alive.
+  unsafe {
+    let x = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    let y = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    let width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    let height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    if width <= 0 || height <= 0 {
+      bail!("display reported no usable size ({width}x{height})");
+    }
+    Ok(Desktop {
+      origin: (x, y),
+      size: (width as u32, height as u32),
+    })
+  }
 }
 
 struct GdiCaptureGuard {
@@ -49,19 +68,15 @@ impl Drop for GdiCaptureGuard {
   }
 }
 
-pub fn grab() -> Result<ScreenShot> {
+pub fn grab() -> Result<Pixmap> {
+  let Desktop { origin, size } = desktop()?;
+  let (x, y) = origin;
+  let (width, height) = (size.0 as i32, size.1 as i32);
   // SAFETY: every handle created below is owned by `guard`, whose `Drop` runs
   // on all exit paths including `?`. The bitmap stays mapped and untouched by
   // anyone else until then, and its pixels are copied out before this function
   // returns, which is also when the handles are released.
   unsafe {
-    let x = GetSystemMetrics(SM_XVIRTUALSCREEN);
-    let y = GetSystemMetrics(SM_YVIRTUALSCREEN);
-    let width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-    let height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-    if width <= 0 || height <= 0 {
-      bail!("display reported no usable size ({width}x{height})");
-    }
     let pixels = (width * height * 4) as usize;
 
     let screen_dc = GetDC(None);
@@ -129,9 +144,6 @@ pub fn grab() -> Result<ScreenShot> {
     let pixmap = Pixmap::from_vec(data, size)
       .context("zero-sized capture or allocation failed")?;
 
-    Ok(ScreenShot {
-      pixmap,
-      origin: (x, y),
-    })
+    Ok(pixmap)
   }
 }

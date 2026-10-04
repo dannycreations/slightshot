@@ -23,6 +23,18 @@ const TOOLTIP_PAD: f32 = 5.0;
 const TOOLTIP_GAP: f32 = 6.0;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Backdrop {
+  Frozen,
+  Live,
+}
+
+impl Backdrop {
+  pub fn picks_region(self) -> bool {
+    matches!(self, Backdrop::Frozen)
+  }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Command {
   Tool(Tool),
   NextColor,
@@ -138,8 +150,16 @@ pub fn build(
   tool: Tool,
   history: &History,
   show_chrome: bool,
+  backdrop: Backdrop,
 ) {
-  let ready = deliverable_region(selection).is_some();
+  let live = !backdrop.picks_region();
+  chrome.tools.truncate(TOOL_BUTTONS.len());
+  if live {
+    chrome.tools.push(button(Command::Close, draw::Icon::Close));
+  }
+
+  let ready =
+    backdrop.picks_region() && deliverable_region(selection).is_some();
   let can_undo = history.can_undo();
 
   for b in chrome.tools.iter_mut().chain(&mut chrome.actions) {
@@ -151,8 +171,14 @@ pub fn build(
   let Some(sel) = selection.filter(|_| show_chrome) else {
     return;
   };
-  layout_panel(&mut chrome.tools, sel, bounds, Axis::Vertical);
-  layout_panel(&mut chrome.actions, sel, bounds, Axis::Horizontal);
+  let hang = match live {
+    true => Hang::Centered,
+    false => Hang::OffSelection,
+  };
+  layout_panel(&mut chrome.tools, sel, bounds, Axis::Vertical, hang);
+  if !live {
+    layout_panel(&mut chrome.actions, sel, bounds, Axis::Horizontal, hang);
+  }
 }
 
 pub fn hotspot_at(chrome: &Chrome, p: Point) -> Option<Hotspot> {
@@ -176,7 +202,19 @@ enum Axis {
   Horizontal,
 }
 
-fn layout_panel(buttons: &mut [Button], sel: Rect, bounds: Rect, axis: Axis) {
+#[derive(Clone, Copy)]
+enum Hang {
+  OffSelection,
+  Centered,
+}
+
+fn layout_panel(
+  buttons: &mut [Button],
+  sel: Rect,
+  bounds: Rect,
+  axis: Axis,
+  hang: Hang,
+) {
   let count = buttons.len() as f32;
   let step = BUTTON + TOOL_GAP;
   let main = count * BUTTON + (count - 1.0) * TOOL_GAP + PANEL_PAD * 2.0;
@@ -193,10 +231,18 @@ fn layout_panel(buttons: &mut [Button], sel: Rect, bounds: Rect, axis: Axis) {
         x = sel.right() - width - 6.0;
       }
       x = clamp_span(x, width, bounds.x, bounds.right());
-      let y = (sel.bottom() - height).clamp(
-        bounds.y + 4.0,
-        (bounds.bottom() - height - 4.0).max(bounds.y),
-      );
+      let y = match hang {
+        Hang::OffSelection => (sel.bottom() - height).clamp(
+          bounds.y + 4.0,
+          (bounds.bottom() - height - 4.0).max(bounds.y),
+        ),
+        Hang::Centered => clamp_span(
+          sel.center().y - height * 0.5,
+          height,
+          bounds.y + 4.0,
+          bounds.bottom() - 4.0,
+        ),
+      };
       (x, y)
     }
     Axis::Horizontal => {
@@ -225,6 +271,7 @@ pub struct Scene<'a> {
   pub inked_canvas: &'a Pixmap,
   pub bounds: Rect,
   pub selection: Option<Rect>,
+  pub backdrop: Backdrop,
   pub draft: Option<&'a Shape>,
   pub typing: Option<(Point, &'a str, f32)>,
   pub palette_index: usize,
@@ -247,9 +294,14 @@ pub fn paint(pm: &mut Pixmap, scene: &Scene) {
   let at = (x0, y0);
   copy_region(pm, scene.inked_canvas, at, at, (width, height));
   draw_live(pm, scene);
-  draw::dashed_rect(pm, sel, [255, 255, 255]);
-  draw_handles(pm, sel);
-  draw_badge(pm, sel, scene.bounds, scene.text);
+  // An area the user picked can be adjusted, so it gets the outline and the
+  // handles that say so. A live overlay's area is the window itself and cannot
+  // be adjusted, so those would only promise something that is not there.
+  if scene.backdrop.picks_region() {
+    draw::dashed_rect(pm, sel, [255, 255, 255]);
+    draw_handles(pm, sel);
+    draw_badge(pm, sel, scene.bounds, scene.text);
+  }
   if let Some((at, buffer, size)) = scene.typing {
     let caret_x = at.x + scene.text.width(buffer, size);
     draw::polyline(
@@ -745,6 +797,7 @@ mod tests {
       Tool::Pen,
       &History::default(),
       true,
+      Backdrop::Frozen,
     );
     assert!(chrome.tools.iter().all(|b| b.area.w > 0.0));
     build(
@@ -754,6 +807,7 @@ mod tests {
       Tool::Pen,
       &History::default(),
       true,
+      Backdrop::Frozen,
     );
     assert!(chrome.tools.iter().all(|b| b.area.w == 0.0));
     assert!(chrome.actions.iter().all(|b| b.area.w == 0.0));
@@ -761,7 +815,9 @@ mod tests {
 
   #[test]
   fn build_shows_deliver_buttons_when_selection_is_ready() {
-    let sel = Rect::new(10.0, 10.0, 200.0, 150.0);
+    // Tall enough for the whole column, so it can hang off the region's own
+    // bottom edge rather than being clamped back onto the screen.
+    let sel = Rect::new(10.0, 10.0, 200.0, 400.0);
     let mut chrome = Chrome::default();
     build(
       &mut chrome,
@@ -770,11 +826,22 @@ mod tests {
       Tool::Pen,
       &History::default(),
       true,
+      Backdrop::Frozen,
     );
     assert!(chrome.tools.iter().all(|b| b.area.w > 0.0));
     assert!(chrome.actions.iter().all(|b| b.area.w > 0.0));
     let close = chrome.actions.iter().find(|b| b.command == Command::Close);
     assert!(close.is_some_and(|b| b.enabled));
+    let lowest = chrome
+      .tools
+      .iter()
+      .map(|b| b.area.bottom())
+      .fold(f32::MIN, f32::max);
+    assert_eq!(
+      lowest,
+      sel.bottom() - PANEL_PAD,
+      "a picked region keeps its column hanging off its own bottom edge"
+    );
   }
 
   #[test]
@@ -789,6 +856,7 @@ mod tests {
       Tool::Pen,
       &History::default(),
       true,
+      Backdrop::Frozen,
     );
     build(
       &mut chrome,
@@ -797,6 +865,7 @@ mod tests {
       Tool::Pen,
       &History::default(),
       false,
+      Backdrop::Frozen,
     );
     assert!(chrome.tools.iter().all(|b| b.area.w == 0.0));
     assert!(chrome.actions.iter().all(|b| b.area.w == 0.0));
@@ -815,6 +884,7 @@ mod tests {
       Tool::Arrow,
       &history,
       true,
+      Backdrop::Frozen,
     );
 
     fn find(chrome: &Chrome, command: Command) -> &Button {
@@ -843,13 +913,121 @@ mod tests {
       Tool::Arrow,
       &history,
       true,
+      Backdrop::Frozen,
     );
     assert!(find(&chrome, Command::Undo).enabled);
 
     let tiny = Rect::new(10.0, 10.0, 1.0, 1.0);
-    build(&mut chrome, Some(tiny), bounds, Tool::Arrow, &history, true);
+    build(
+      &mut chrome,
+      Some(tiny),
+      bounds,
+      Tool::Arrow,
+      &history,
+      true,
+      Backdrop::Frozen,
+    );
     assert!(!find(&chrome, Command::Deliver(Deliverable::Copy)).enabled);
     assert!(find(&chrome, Command::Close).enabled);
+  }
+
+  #[test]
+  fn a_live_backdrop_offers_nothing_to_deliver() {
+    // Drawing over the live desktop never captured anything, so the three
+    // actions that hand an image off have nothing to hand. Closing the overlay
+    // still has to work.
+    let sel = Rect::new(10.0, 10.0, 200.0, 150.0);
+    let mut history = History::default();
+    history.push(Shape::Caption {
+      at: Point::new(5.0, 5.0),
+      text: "x".to_string(),
+      color: [0, 0, 0],
+      size: 10.0,
+    });
+    let mut chrome = Chrome::default();
+    build(
+      &mut chrome,
+      Some(sel),
+      Rect::new(0.0, 0.0, 1920.0, 1080.0),
+      Tool::Pen,
+      &history,
+      true,
+      Backdrop::Live,
+    );
+    for button in chrome.tools.iter().chain(&chrome.actions) {
+      if matches!(button.command, Command::Deliver(_)) {
+        assert!(!button.enabled, "{button:?} cannot deliver a live overlay");
+      }
+    }
+    // The close button the live overlay shows is the one in the column.
+    let close = chrome.tools.iter().find(|b| b.command == Command::Close);
+    assert!(close.is_some_and(|b| b.enabled));
+  }
+
+  #[test]
+  fn a_live_backdrop_shows_its_tools_before_anything_is_picked() {
+    // The whole screen is the area, so the panel has to be laid out from the
+    // moment the overlay opens rather than after a drag. Nothing was captured,
+    // so the row of delivery actions stays hidden and Close ends the column.
+    let bounds = Rect::new(0.0, 0.0, 1920.0, 1080.0);
+    let mut chrome = Chrome::default();
+    build(
+      &mut chrome,
+      Some(bounds),
+      bounds,
+      Tool::Pen,
+      &History::default(),
+      true,
+      Backdrop::Live,
+    );
+
+    fn find(buttons: &[Button], command: Command) -> &Button {
+      buttons
+        .iter()
+        .find(|b| b.command == command)
+        .expect("the column carries every command it shows")
+    }
+
+    assert!(chrome.tools.iter().all(|b| b.area.w > 0.0));
+    assert!(
+      chrome.actions.iter().all(|b| b.area.w == 0.0),
+      "a live overlay has nothing to hand over, so its row stays hidden"
+    );
+
+    let top = chrome
+      .tools
+      .iter()
+      .map(|b| b.area.y)
+      .fold(f32::MAX, f32::min);
+    let bottom = chrome
+      .tools
+      .iter()
+      .map(|b| b.area.bottom())
+      .fold(f32::MIN, f32::max);
+    assert!(
+      (top + bottom - (bounds.y + bounds.bottom())).abs() < 1.0,
+      "the live column is centred on the screen, got {top}..{bottom}"
+    );
+
+    let undo = find(&chrome.tools, Command::Undo);
+    let close = find(&chrome.tools, Command::Close);
+    assert_eq!(close.area.x, undo.area.x);
+    assert_eq!(
+      close.area.y,
+      undo.area.bottom() + TOOL_GAP,
+      "close sits one slot below undo"
+    );
+    assert!(close.enabled);
+    assert_eq!(
+      hotspot_at(&chrome, close.area.center()),
+      Some(Hotspot::Tool(chrome.tools.len() - 1)),
+      "the close button at the foot of the column has to be clickable"
+    );
+    for button in &chrome.tools {
+      if matches!(button.command, Command::Tool(Tool::Pen)) {
+        assert!(button.active, "the pen is the tool in hand");
+      }
+    }
   }
 
   #[test]
@@ -1007,6 +1185,7 @@ mod tests {
       Tool::Select,
       &history,
       false,
+      Backdrop::Frozen,
     );
 
     let draft = Shape::Line {
@@ -1024,6 +1203,7 @@ mod tests {
       inked_canvas: &canvas,
       bounds,
       selection,
+      backdrop: Backdrop::Frozen,
       draft: Some(&draft),
       typing: None,
       palette_index: 0,

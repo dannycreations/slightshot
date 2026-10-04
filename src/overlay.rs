@@ -7,9 +7,9 @@ use std::{
   time::{Duration, Instant},
 };
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use softbuffer::{Context as SoftContext, Surface as SoftSurface};
-use tiny_skia::Pixmap;
+use tiny_skia::{Color, Pixmap};
 use windows::{
   core::BOOL,
   Win32::{
@@ -38,8 +38,9 @@ use crate::{
   capture,
   geom::{hit_handle, resized, Handle, Point, Rect},
   hotkey::Trigger,
+  layer::Layered,
   pixel::swap_channels_to_words,
-  render::{self, Chrome, Hotspot, Scene, HANDLE_SLOP},
+  render::{self, Backdrop, Chrome, Hotspot, Scene, HANDLE_SLOP},
   text::TextEngine,
 };
 
@@ -100,6 +101,33 @@ enum Step {
 
 type Surface = SoftSurface<Arc<Window>, Arc<Window>>;
 
+enum Presenter {
+  Solid(Surface),
+  Live(Layered),
+}
+
+impl Presenter {
+  fn present(&mut self, frame: &Pixmap) -> Result<()> {
+    match self {
+      Presenter::Solid(surface) => {
+        let Ok(mut buffer) = surface.buffer_mut() else {
+          return Ok(());
+        };
+        if buffer.len() != (frame.width() * frame.height()) as usize {
+          return Ok(());
+        }
+        swap_channels_to_words(frame.data(), &mut buffer);
+        let _ = buffer.present();
+        Ok(())
+      }
+      // A layered window that cannot be composited stays on the screen as an
+      // invisible sheet that still swallows the pointer, so this one is worth
+      // reporting instead of dropping.
+      Presenter::Live(layer) => layer.present(frame),
+    }
+  }
+}
+
 struct Ink {
   canvas: Pixmap,
   backdrop: Pixmap,
@@ -126,11 +154,12 @@ impl Ink {
 
 struct Session {
   window: Arc<Window>,
+  backdrop_kind: Backdrop,
   canvas: Pixmap,
   backdrop: Pixmap,
   ink: Option<Ink>,
   frame: Pixmap,
-  surface: Surface,
+  presenter: Presenter,
   bounds: Rect,
   selection: Option<Rect>,
   mode: Mode,
@@ -182,7 +211,14 @@ impl ApplicationHandler<Trigger> for App {
     match event {
       WindowEvent::CloseRequested => self.session = None,
       WindowEvent::ModifiersChanged(state) => session.modifiers = state.state(),
-      WindowEvent::RedrawRequested => session.render(),
+      WindowEvent::RedrawRequested => {
+        if let Err(error) = session.render() {
+          // The overlay is still a full-screen window even when nothing shows
+          // through it, so a dead presenter has to give the desktop back.
+          eprintln!("slightshot: the overlay stopped presenting: {error:#}");
+          self.session = None;
+        }
+      }
       WindowEvent::CursorMoved { position, .. } => session.mouse_move(position),
       WindowEvent::MouseInput {
         state: ElementState::Pressed,
@@ -237,24 +273,26 @@ impl ApplicationHandler<Trigger> for App {
 
   fn user_event(&mut self, event_loop: &ActiveEventLoop, event: Trigger) {
     match event {
-      Trigger::Capture => {
-        if self.session.is_none() {
-          match Session::create(event_loop) {
-            Ok(session) => self.session = Some(session),
-            Err(error) => {
-              eprintln!(
-                "slightshot: could not lock the screen for selection: {error:#}"
-              )
-            }
-          }
-        }
-      }
+      Trigger::Capture => self.open(event_loop, Backdrop::Frozen),
+      Trigger::Live => self.open(event_loop, Backdrop::Live),
       Trigger::Quit => event_loop.exit(),
     }
   }
 }
 
 impl App {
+  fn open(&mut self, event_loop: &ActiveEventLoop, backdrop: Backdrop) {
+    if self.session.is_some() {
+      return;
+    }
+    match Session::create(event_loop, backdrop) {
+      Ok(session) => self.session = Some(session),
+      Err(error) => {
+        eprintln!("slightshot: could not open the overlay: {error:#}")
+      }
+    }
+  }
+
   fn finish(&mut self, outcome: Outcome) {
     self.session = None;
     let Outcome::Deliver { deliverable, shot } = outcome else {
@@ -268,18 +306,21 @@ impl App {
 }
 
 impl Session {
-  fn create(event_loop: &ActiveEventLoop) -> Result<Self> {
-    let shot = capture::grab().context("screen capture failed")?;
+  fn create(event_loop: &ActiveEventLoop, backdrop: Backdrop) -> Result<Self> {
+    let desktop = capture::desktop().context("reading the display failed")?;
     let engine = TextEngine::load()?;
-    let origin = shot.origin;
-    let canvas = shot.pixmap;
+    let origin = desktop.origin;
+    let canvas = match backdrop {
+      Backdrop::Frozen => capture::grab().context("screen capture failed")?,
+      Backdrop::Live => live_canvas(desktop.size)?,
+    };
     let bounds = Rect::new(
       origin.0 as f32,
       origin.1 as f32,
       canvas.width() as f32,
       canvas.height() as f32,
     );
-    let backdrop = render::dimmed_copy(&canvas);
+    let dimmed = render::dimmed_copy(&canvas);
     let attributes = Window::default_attributes()
       .with_title("slightshot")
       .with_window_level(WindowLevel::AlwaysOnTop)
@@ -294,33 +335,32 @@ impl Session {
         .create_window(attributes)
         .context("creating the overlay window failed")?,
     );
-    quiet_window(&window);
-    let context = SoftContext::new(window.clone()).map_err(|error| {
-      anyhow!("no graphics context for the overlay: {error}")
-    })?;
-    let mut surface = SoftSurface::new(&context, window.clone())
-      .map_err(|error| anyhow!("no surface for the overlay: {error}"))?;
-    surface
-      .resize(
-        NonZeroU32::new(canvas.width()).context("zero-width capture")?,
-        NonZeroU32::new(canvas.height()).context("zero-height capture")?,
-      )
-      .map_err(|e| anyhow!("failed to resize the overlay surface: {e}"))?;
+    let Some(handle) = window_handle(&window) else {
+      bail!("the overlay window is not a Win32 window");
+    };
+    quiet_window(handle);
+    let size = (canvas.width(), canvas.height());
+    let presenter = match backdrop {
+      Backdrop::Frozen => Presenter::Solid(solid_surface(&window, size)?),
+      Backdrop::Live => Presenter::Live(Layered::new(handle, size.0, size.1)?),
+    };
 
     let frame = Pixmap::new(canvas.width(), canvas.height())
       .expect("frame allocation failed");
 
+    let (selection, tool) = opening(bounds, backdrop);
     let mut session = Self {
       window,
+      backdrop_kind: backdrop,
       canvas,
-      backdrop,
+      backdrop: dimmed,
       ink: None,
       frame,
-      surface,
+      presenter,
       bounds,
-      selection: None,
+      selection,
       mode: Mode::Idle,
-      tool: Tool::Select,
+      tool,
       palette_index: 0,
       history: History::default(),
       engine,
@@ -335,7 +375,7 @@ impl Session {
       current_cursor: CursorIcon::default(),
     };
     session.window.set_visible(true);
-    session.render();
+    session.render()?;
     Ok(session)
   }
 
@@ -359,7 +399,7 @@ impl Session {
     }
   }
 
-  fn render(&mut self) {
+  fn render(&mut self) -> Result<()> {
     self.expire_hint();
     render::build(
       &mut self.chrome,
@@ -368,6 +408,7 @@ impl Session {
       self.tool,
       &self.history,
       self.mode.shows_chrome(),
+      self.backdrop_kind,
     );
     let chrome = &self.chrome;
     let (inked_backdrop, inked_canvas) = match &self.ink {
@@ -384,6 +425,7 @@ impl Session {
       inked_canvas,
       bounds: self.bounds,
       selection: self.selection,
+      backdrop: self.backdrop_kind,
       draft,
       typing,
       palette_index: self.palette_index,
@@ -394,18 +436,14 @@ impl Session {
     };
 
     render::paint(frame, &scene);
-    self.present();
+    self.present()
   }
 
-  fn present(&mut self) {
-    let Ok(mut buffer) = self.surface.buffer_mut() else {
-      return;
-    };
-    if buffer.len() != (self.frame.width() * self.frame.height()) as usize {
-      return;
-    }
-    swap_channels_to_words(self.frame.data(), &mut buffer);
-    let _ = buffer.present();
+  fn present(&mut self) -> Result<()> {
+    let Session {
+      presenter, frame, ..
+    } = self;
+    presenter.present(frame)
   }
 
   fn mouse_move(&mut self, position: PhysicalPosition<f64>) {
@@ -572,7 +610,9 @@ impl Session {
     };
     match command {
       render::Command::Tool(tool) => {
-        self.tool = if self.tool == tool {
+        // Clicking the tool in hand puts it down and brings the region back,
+        // which only means something where the user has a region to pick.
+        self.tool = if self.tool == tool && self.backdrop_kind.picks_region() {
           Tool::Select
         } else {
           tool
@@ -596,6 +636,9 @@ impl Session {
   }
 
   fn deliver(&self, deliverable: Deliverable) -> Option<Outcome> {
+    if !self.backdrop_kind.picks_region() {
+      return None;
+    }
     let sel = render::deliverable_region(self.selection)?;
     let source = self.ink.as_ref().map_or(&self.canvas, |ink| &ink.canvas);
     Some(Outcome::Deliver {
@@ -736,14 +779,22 @@ impl Session {
   }
 }
 
-fn quiet_window(window: &Window) {
-  let Ok(handle) = window.window_handle() else {
-    return;
-  };
+fn opening(bounds: Rect, backdrop: Backdrop) -> (Option<Rect>, Tool) {
+  match backdrop {
+    Backdrop::Frozen => (None, Tool::Select),
+    Backdrop::Live => (Some(bounds), Tool::Pen),
+  }
+}
+
+fn window_handle(window: &Window) -> Option<HWND> {
+  let handle = window.window_handle().ok()?;
   let RawWindowHandle::Win32(win32) = handle.as_raw() else {
-    return;
+    return None;
   };
-  let hwnd = HWND(win32.hwnd.get() as *mut c_void);
+  Some(HWND(win32.hwnd.get() as *mut c_void))
+}
+
+fn quiet_window(hwnd: HWND) {
   // SAFETY: `hwnd` is the handle of the window just created, which outlives
   // this call. Both writes target only that window: the class brush is set to
   // null, and the DWM attribute is a plain value write.
@@ -757,6 +808,27 @@ fn quiet_window(window: &Window) {
       mem::size_of::<BOOL>() as u32,
     );
   }
+}
+
+fn solid_surface(window: &Arc<Window>, size: (u32, u32)) -> Result<Surface> {
+  let context = SoftContext::new(window.clone())
+    .map_err(|error| anyhow!("no graphics context for the overlay: {error}"))?;
+  let mut surface = SoftSurface::new(&context, window.clone())
+    .map_err(|error| anyhow!("no surface for the overlay: {error}"))?;
+  surface
+    .resize(
+      NonZeroU32::new(size.0).context("zero-width capture")?,
+      NonZeroU32::new(size.1).context("zero-height capture")?,
+    )
+    .map_err(|e| anyhow!("failed to resize the overlay surface: {e}"))?;
+  Ok(surface)
+}
+
+fn live_canvas(size: (u32, u32)) -> Result<Pixmap> {
+  let mut canvas =
+    Pixmap::new(size.0, size.1).context("allocating the live canvas failed")?;
+  canvas.fill(Color::from_rgba8(0, 0, 0, 1));
+  Ok(canvas)
 }
 
 fn format_size(size: f32) -> String {
@@ -840,6 +912,16 @@ mod tests {
 
   use super::*;
   use crate::geom::{handle_anchor, HANDLES};
+
+  #[test]
+  fn a_live_overlay_opens_covering_the_screen_with_the_pen_out() {
+    let bounds = Rect::new(0.0, 0.0, 1920.0, 1080.0);
+    // The whole screen is the area and the pen is already in hand, so the very
+    // first click after the hotkey draws instead of dragging out a region or
+    // hunting for the pen in the toolbar.
+    assert_eq!(opening(bounds, Backdrop::Live), (Some(bounds), Tool::Pen));
+    assert_eq!(opening(bounds, Backdrop::Frozen), (None, Tool::Select));
+  }
 
   #[test]
   fn extend_draft_reports_the_segment_a_stroke_gained() {

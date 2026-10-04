@@ -4,6 +4,7 @@ mod capture;
 mod draw;
 mod geom;
 mod hotkey;
+mod layer;
 mod overlay;
 mod pixel;
 mod render;
@@ -38,11 +39,14 @@ fn run() -> Result<()> {
   let event_loop = EventLoop::<hotkey::Trigger>::with_user_event().build()?;
   let proxy = event_loop.create_proxy();
   hotkey::spawn(proxy.clone())?;
-  println!("slightshot: press Numpad 8 to snapshot the screen.");
+  println!(
+    "slightshot: press Numpad 8 to snapshot the screen, Numpad 9 to draw over it \
+     live."
+  );
   ctrlc::set_handler(move || {
     let _ = proxy.send_event(hotkey::Trigger::Quit);
   })?;
   event_loop.run_app(&mut App::default())?;
-  println!("slightshot: unwatching Numpad 8.");
+  println!("slightshot: unwatching Numpad 8 and Numpad 9.");
   Ok(())
 }
