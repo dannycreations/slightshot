@@ -56,9 +56,6 @@ impl Layered {
         self.size.cy
       );
     }
-    if area.is_empty() {
-      return Ok(());
-    }
     self.ensure_layered()?;
     // tiny-skia keeps premultiplied RGBA, which is what a 32-bit layered
     // window wants once red and blue are the right way round.

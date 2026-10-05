@@ -292,11 +292,7 @@ impl Session {
 
   pub(super) fn rebuild(&mut self, area: Rect) {
     self.snapshot();
-    let Some(base) = &self.base else {
-      // Nothing was ever inked, so the canvas is still the capture and there is
-      // nothing to put back.
-      return;
-    };
+    let base = self.base.as_ref().expect("just snapshotted");
     let Screen {
       canvas, backdrop, ..
     } = &mut self.buffers;

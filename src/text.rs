@@ -21,7 +21,7 @@ const FONT_FILES: [&str; 4] =
   ["segoeui.ttf", "arial.ttf", "tahoma.ttf", "calibri.ttf"];
 const ASCENT_RATIO: f32 = 0.8;
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 struct GlyphInfo {
   metrics: Metrics,
   offset: u32,
@@ -80,7 +80,7 @@ impl TextEngine {
 
   fn glyph_info(&self, ch: char, size: f32) -> GlyphInfo {
     match self.glyphs.borrow_mut().entry((ch, size.to_bits())) {
-      Entry::Occupied(entry) => entry.get().clone(),
+      Entry::Occupied(entry) => *entry.get(),
       Entry::Vacant(entry) => {
         let (metrics, coverage) = self.font.rasterize(ch, size);
         let mut atlas = self.atlas.borrow_mut();
@@ -91,7 +91,7 @@ impl TextEngine {
           offset,
           len: coverage.len() as u32,
         };
-        entry.insert(info.clone());
+        entry.insert(info);
         info
       }
     }

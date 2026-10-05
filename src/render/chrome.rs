@@ -13,12 +13,12 @@ use crate::{
 #[path = "chrome_test.rs"]
 mod chrome_test;
 
-pub(super) const BUTTON: f32 = 30.0;
-pub(super) const TOOL_GAP: f32 = 2.0;
-pub(super) const PANEL_PAD: f32 = 5.0;
-pub(super) const COLUMN_GAP: f32 = 6.0;
-pub(super) const ROW_GAP: f32 = 8.0;
-pub(super) const SCREEN_MARGIN: f32 = 4.0;
+const BUTTON: f32 = 30.0;
+const TOOL_GAP: f32 = 2.0;
+const PANEL_PAD: f32 = 5.0;
+const COLUMN_GAP: f32 = 6.0;
+const ROW_GAP: f32 = 8.0;
+const SCREEN_MARGIN: f32 = 4.0;
 const ICON_BOX: f32 = 18.0;
 const TOOLTIP_TEXT: f32 = 14.0;
 const TOOLTIP_PAD: f32 = 5.0;

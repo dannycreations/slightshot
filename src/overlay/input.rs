@@ -343,9 +343,9 @@ impl Session {
         let Shape::Text { at, text, size, .. } = shape else {
           return None;
         };
-        let box_ = self.engine.bounds(text, *at, *size);
-        (!box_.is_empty() && box_.inflated(GRAB_SLOP).contains(p))
-          .then_some((index, box_))
+        let box_ = self.text_box(*at, text, *size)?;
+        let grab = box_.inflated(GRAB_SLOP);
+        grab.contains(p).then_some((index, box_))
       })
   }
 
