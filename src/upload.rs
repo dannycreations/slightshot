@@ -3,6 +3,10 @@ use std::{borrow::Cow, env, time::Duration};
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
 
+#[cfg(test)]
+#[path = "upload_test.rs"]
+mod upload_test;
+
 const ENDPOINT: &str = "https://api.imgur.com/3/image";
 const CLIENT_ID_VAR: &str = "IMGUR_CLIENT_ID";
 const BOUNDARY: &str = "slightshot-multipart-7f3a";
@@ -83,40 +87,5 @@ fn preview(body: &str) -> &str {
   match body.char_indices().nth(300) {
     Some((idx, _)) => &body[..idx],
     None => body,
-  }
-}
-
-#[cfg(test)]
-mod tests {
-  use super::*;
-
-  #[test]
-  fn success_reply_yields_the_image_link() {
-    let link = parse_link(
-      r#"{"data":{"id":"abc","link":"https://i.imgur.com/abc.png",
-        "deletehash":"del"},"success":true,"status":200}"#,
-    )
-    .unwrap();
-    assert_eq!(link, "https://i.imgur.com/abc.png");
-  }
-
-  #[test]
-  fn rejected_reply_names_the_reason() {
-    let error = parse_link(
-      r#"{"data":{"error":"Invalid client_id"},"success":false,"status":403}"#,
-    )
-    .unwrap_err();
-    assert!(error.to_string().contains("Invalid client_id"));
-  }
-
-  #[test]
-  fn multipart_carries_png_and_boundary() {
-    let png = vec![1, 2, 3];
-    let body = multipart(&png);
-    let text = String::from_utf8_lossy(&body);
-    assert!(text.contains(BOUNDARY));
-    assert!(text.contains("filename=\"capture.png\""));
-    assert!(text.ends_with(&format!("\r\n--{BOUNDARY}--\r\n")));
-    assert!(body.windows(png.len()).any(|w| w == png.as_slice()));
   }
 }

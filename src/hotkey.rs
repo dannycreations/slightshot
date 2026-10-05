@@ -9,6 +9,10 @@ use windows::Win32::UI::{
 };
 use winit::event_loop::EventLoopProxy;
 
+#[cfg(test)]
+#[path = "hotkey_test.rs"]
+mod hotkey_test;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Trigger {
   Capture,
@@ -100,24 +104,5 @@ fn watch(proxy: EventLoopProxy<Trigger>) {
         }
       }
     }
-  }
-}
-
-#[cfg(test)]
-mod tests {
-  use super::*;
-
-  #[test]
-  fn numpad_8_snapshots_and_numpad_9_draws_live() {
-    let found = KEYS
-      .iter()
-      .map(|key| (key.name, key.trigger))
-      .collect::<Vec<_>>();
-    assert_eq!(
-      found,
-      vec![("Numpad 8", Trigger::Capture), ("Numpad 9", Trigger::Live),]
-    );
-    assert_eq!(Key::trigger_for(2), Some(Trigger::Live));
-    assert_eq!(Key::trigger_for(99), None);
   }
 }
