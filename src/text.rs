@@ -133,6 +133,14 @@ impl TextEngine {
       .sum()
   }
 
+  pub fn bounds(&self, text: &str, at: Point, size: f32) -> Rect {
+    let width = self.width(text, size);
+    if width <= 0.0 {
+      return Rect::ZERO;
+    }
+    Rect::new(at.x, at.y, width, size)
+  }
+
   pub fn inked(&self, text: &str, at: Point, size: f32) -> Rect {
     if text.is_empty() {
       return Rect::ZERO;
@@ -150,6 +158,12 @@ impl TextEngine {
         metrics.height as f32,
       ));
       pen += metrics.advance_width;
+    }
+    // A run of nothing but spaces inks nothing, and a box around nothing is
+    // not a box: inflating the empty rect would leave one sitting at the
+    // origin for a click to land on.
+    if area.is_empty() {
+      return Rect::ZERO;
     }
     area.inflated(1.0)
   }
@@ -280,6 +294,32 @@ mod tests {
     assert!(
       !area.is_empty() && area.w > 20.0,
       "a two letter run has to report a box, got {area:?}"
+    );
+  }
+
+  #[test]
+  fn the_box_a_run_fills_is_anchored_at_its_own_corner() {
+    let Ok(engine) = TextEngine::load() else {
+      return;
+    };
+    let at = Point::new(40.0, 60.0);
+    let box_ = engine.bounds("Hg", at, 20.0);
+    // A resize measures from a corner of this box and moves the anchor to it,
+    // so a corner that is not the anchor would shift the run on every drag.
+    assert_eq!(
+      (box_.x, box_.y),
+      (at.x, at.y),
+      "the box's top left corner is the anchor"
+    );
+    assert_eq!(box_.h, 20.0, "the box is the line the run sits on");
+    assert!(
+      box_.w > engine.bounds("H", at, 20.0).w,
+      "a longer run fills a wider box"
+    );
+    assert!(
+      engine.bounds("", at, 20.0).is_empty(),
+      "a run with nothing in it fills no box, or it would sit at the origin \
+       waiting for a click"
     );
   }
 

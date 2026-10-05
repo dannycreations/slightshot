@@ -47,8 +47,11 @@ use crate::{
 };
 
 const HINT_DURATION: Duration = Duration::from_millis(800);
-
+const CARET_BLINK: Duration = Duration::from_millis(530);
 const MAX_STRETCH: f32 = 8.0;
+const GRAB_SLOP: f32 = 4.0;
+const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+const DOUBLE_CLICK_SLOP: f32 = 4.0;
 
 enum Outcome {
   Close,
@@ -62,9 +65,70 @@ enum Mode {
   Idle,
   Rubber(Point),
   Draw(Shape, Point),
-  Move(Point),
-  Resize(Handle, Rect),
-  Type(String, Point),
+  MoveRegion(Point),
+  MoveText {
+    index: usize,
+    lifted: Option<Shape>,
+    last: Point,
+  },
+  ResizeRegion(Handle, Rect),
+  ResizeText {
+    index: usize,
+    lifted: Option<Shape>,
+    handle: Handle,
+    origin: Rect,
+  },
+  Type(Typing),
+}
+
+struct Typing {
+  buffer: String,
+  at: Point,
+  size: f32,
+  color: [u8; 3],
+  editing: Option<usize>,
+  caret: Caret,
+}
+
+impl Typing {
+  fn new(at: Point, size: f32, color: [u8; 3]) -> Self {
+    Self {
+      buffer: String::new(),
+      at,
+      size,
+      color,
+      editing: None,
+      caret: Caret::new(Instant::now()),
+    }
+  }
+}
+
+struct Caret {
+  lit: bool,
+  due: Instant,
+}
+
+impl Caret {
+  fn new(now: Instant) -> Self {
+    Self {
+      lit: true,
+      due: now + CARET_BLINK,
+    }
+  }
+
+  fn flip(&mut self, now: Instant) -> bool {
+    if now < self.due {
+      return false;
+    }
+    self.lit = !self.lit;
+    self.due = now + CARET_BLINK;
+    true
+  }
+
+  fn restart(&mut self, now: Instant) {
+    self.lit = true;
+    self.due = now + CARET_BLINK;
+  }
 }
 
 impl Mode {
@@ -72,21 +136,44 @@ impl Mode {
   fn draft(&self) -> Option<&Shape> {
     match self {
       Mode::Draw(shape, _) if !shape.is_stroke() => Some(shape),
+      Mode::MoveText { lifted, .. } | Mode::ResizeText { lifted, .. } => {
+        lifted.as_ref()
+      }
       _ => None,
     }
   }
 
   #[inline(always)]
-  fn typing(&self) -> Option<(Point, &str)> {
+  fn dragging_text(&self) -> bool {
+    matches!(self, Mode::MoveText { .. } | Mode::ResizeText { .. })
+  }
+
+  #[inline(always)]
+  fn typing(&self) -> Option<(Point, &str, f32, [u8; 3])> {
     match self {
-      Mode::Type(buffer, at) => Some((*at, buffer.as_str())),
+      Mode::Type(typing) => {
+        Some((typing.at, typing.buffer.as_str(), typing.size, typing.color))
+      }
       _ => None,
     }
+  }
+
+  #[inline(always)]
+  fn caret(&self) -> Option<&Caret> {
+    match self {
+      Mode::Type(typing) => Some(&typing.caret),
+      _ => None,
+    }
+  }
+
+  #[inline(always)]
+  fn caret_due(&self) -> Option<Instant> {
+    Some(self.caret()?.due)
   }
 
   #[inline(always)]
   fn shows_chrome(&self) -> bool {
-    matches!(self, Mode::Idle | Mode::Draw(_, _) | Mode::Type(_, _))
+    matches!(self, Mode::Idle | Mode::Draw(_, _) | Mode::Type(_))
   }
 
   #[inline(always)]
@@ -199,12 +286,14 @@ struct Session {
   presenter: Presenter,
   bounds: Rect,
   selection: Option<Rect>,
+  picked: Option<usize>,
   mode: Mode,
   tool: Tool,
   palette_index: usize,
   history: History,
   engine: TextEngine,
   cursor: Point,
+  press: Option<(Instant, Point)>,
   raw_path: Vec<Point>,
   hover: Option<Hotspot>,
   chrome: Chrome,
@@ -229,13 +318,18 @@ impl ApplicationHandler<Trigger> for App {
     let Some(session) = self.session.as_mut() else {
       return;
     };
+    session.blink();
     if session.expire_hint() {
       session.window.request_redraw();
-    } else if let Some((_, until)) = session.hint {
-      event_loop.set_control_flow(ControlFlow::WaitUntil(until));
-    } else {
-      event_loop.set_control_flow(ControlFlow::Wait);
     }
+    // A hint about to expire and a caret about to blink both want the loop,
+    // and whichever is due first is the one that has to wake it.
+    let due = [session.hint_due(), session.mode.caret_due()]
+      .into_iter()
+      .flatten()
+      .min();
+    event_loop
+      .set_control_flow(due.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
   }
 
   fn window_event(
@@ -288,7 +382,7 @@ impl ApplicationHandler<Trigger> for App {
           return;
         }
         match event.logical_key {
-          Key::Named(NamedKey::Enter) => session.commit_label(),
+          Key::Named(NamedKey::Enter) => session.press_enter(),
           Key::Named(NamedKey::Backspace) => session.backspace(),
           Key::Character(ch) => {
             if let Some(outcome) = session.character(ch.as_str()) {
@@ -427,12 +521,14 @@ impl Session {
       presenter,
       bounds,
       selection,
+      picked: None,
       mode: Mode::Idle,
       tool,
       palette_index: 0,
       history: History::default(),
       engine,
       cursor: Point::default(),
+      press: None,
       raw_path: Vec::new(),
       hover: None,
       chrome: Chrome::new(backdrop),
@@ -466,6 +562,29 @@ impl Session {
     }
   }
 
+  fn hint_due(&self) -> Option<Instant> {
+    self.hint.as_ref().map(|(_, until)| *until)
+  }
+
+  fn blink(&mut self) {
+    let flipped = match &mut self.mode {
+      Mode::Type(typing) => typing.caret.flip(Instant::now()),
+      _ => false,
+    };
+    if flipped {
+      // The caret is a stroke on the backdrop like any other, so the box the
+      // run takes up is all that has to be painted again.
+      self.repaint_typing();
+    }
+  }
+
+  fn repaint_typing(&mut self) {
+    let area = render::typed_area(self.mode.typing(), &self.engine);
+    if !area.is_empty() {
+      self.repainted(area);
+    }
+  }
+
   fn render(&mut self) -> Result<()> {
     self.expire_hint();
     render::build(
@@ -477,12 +596,14 @@ impl Session {
       self.mode.shows_chrome(),
       self.backdrop_kind,
     );
-    let label_size = self.size(Tool::Label);
     let draft = self.mode.draft();
-    let typing = self
-      .mode
-      .typing()
-      .map(|(at, buffer)| (at, buffer, label_size));
+    let typing = self.mode.typing();
+    // The caret is the session's own clock, so whether it is painted is the
+    // mode's answer and not something the picture can be asked for.
+    let caret = self.mode.caret().is_some_and(|caret| caret.lit);
+    // A run that has been picked keeps its frame until a press reaches no run
+    // at all, whatever tool is in hand: it is an object, not a mode.
+    let picked = self.picked_box();
     let hint = self.hint.as_ref().map(|(text, _)| text.as_str());
     let Screen {
       canvas,
@@ -498,9 +619,11 @@ impl Session {
       canvas,
       bounds: self.bounds,
       selection: self.selection,
+      picked,
       kind: self.backdrop_kind,
       draft,
       typing,
+      caret,
       palette_index: self.palette_index,
       chrome: &self.chrome,
       hotspot: self.hover,
@@ -580,17 +703,19 @@ impl Session {
     if self.hover != previous {
       self.window.request_redraw();
     }
+    // A drag of a run of text is dispatched on its own, because it has to take
+    // the run off the canvas and the borrow of the mode in hand would not allow
+    // it to.
+    if self.mode.dragging_text() {
+      if self.drag_text(p) {
+        self.window.request_redraw();
+      }
+      return;
+    }
     let mut step = None;
     match &mut self.mode {
       Mode::Idle => {
-        let icon = match (self.tool, self.selection) {
-          (Tool::Select, Some(sel)) => match grab_at(sel, p) {
-            Some(Grab::Resize(handle)) => resize_cursor(handle),
-            Some(Grab::Move) => CursorIcon::Move,
-            None => CursorIcon::default(),
-          },
-          _ => CursorIcon::default(),
-        };
+        let icon = self.cursor_at(p);
         self.update_cursor(icon);
       }
       Mode::Rubber(anchor) => {
@@ -600,19 +725,21 @@ impl Session {
       Mode::Draw(draft, anchor) => {
         step = extend_draft(*anchor, draft, p);
       }
-      Mode::Move(last) => {
-        let sel = self.selection.expect("move mode requires a selection");
+      Mode::MoveRegion(last) => {
+        let sel = self
+          .selection
+          .expect("a region is held to move it, and there is one");
         let delta = Point::new(p.x - last.x, p.y - last.y);
-        let moved = sel.moved_inside(self.bounds, delta);
         *last = p;
-        self.set_selection(moved);
+        self.set_selection(sel.moved_inside(self.bounds, delta));
       }
-      Mode::Resize(handle, rect) => {
+      Mode::ResizeRegion(handle, rect) => {
         let target = p.clamped_inside(self.bounds);
         let dragged = resized(*rect, *handle, target);
         self.set_selection(dragged);
       }
-      Mode::Type(_, _) => {}
+      Mode::MoveText { .. } | Mode::ResizeText { .. } => {}
+      Mode::Type(_) => {}
     }
     if let Some(step) = step {
       match step {
@@ -625,6 +752,61 @@ impl Session {
     }
   }
 
+  fn drag_text(&mut self, p: Point) -> bool {
+    let mut mode = mem::replace(&mut self.mode, Mode::Idle);
+    let moved = match &mut mode {
+      Mode::MoveText {
+        index,
+        lifted,
+        last,
+      } => {
+        let delta = Point::new(p.x - last.x, p.y - last.y);
+        *last = p;
+        if lifted.is_none() {
+          *lifted = self.lift_text(*index);
+        }
+        match lifted.as_mut() {
+          Some(Shape::Text { at, text, size, .. }) => {
+            // The whole box has to stay on screen, or the run cannot be
+            // pressed again to bring it back.
+            let box_ = self
+              .engine
+              .bounds(text, Point::new(at.x + delta.x, at.y + delta.y), *size)
+              .clamped_inside(self.bounds);
+            *at = Point::new(box_.x, box_.y);
+            true
+          }
+          _ => false,
+        }
+      }
+      Mode::ResizeText {
+        index,
+        lifted,
+        handle,
+        origin,
+      } => {
+        let target = p.clamped_inside(self.bounds);
+        if lifted.is_none() {
+          *lifted = self.lift_text(*index);
+        }
+        match lifted.as_mut() {
+          Some(Shape::Text { at, text, size, .. }) => {
+            let (next_at, next_size) =
+              resize_text(&self.engine, text, *origin, *handle, target);
+            let moved = *at != next_at || *size != next_size;
+            *at = next_at;
+            *size = next_size;
+            moved
+          }
+          _ => false,
+        }
+      }
+      _ => false,
+    };
+    self.mode = mode;
+    moved
+  }
+
   fn set_selection(&mut self, sel: Rect) {
     if self.selection != Some(sel) {
       self.selection = Some(sel);
@@ -634,26 +816,64 @@ impl Session {
 
   fn mouse_down(&mut self) -> Option<Outcome> {
     let p = self.cursor;
-    if let Some(sel) = self.selection {
-      if let Some(hotspot) = render::hotspot_at(&self.chrome, p) {
-        return self.activate(hotspot);
+    // Whatever is half typed lands first, so no click can drop text the user
+    // can still see being typed.
+    self.commit_typing();
+    let double = self.double_clicked(p);
+    if let Some(hotspot) = render::hotspot_at(&self.chrome, p) {
+      return self.activate(hotspot);
+    }
+    // A run of text is an object: a press on it picks it up, whatever tool is
+    // in hand, so it can be moved and scaled long after it was written.
+    if let Some((index, box_)) = self.text_at(p) {
+      let handle = self.handle_on(index, box_, p);
+      self.picked = Some(index);
+      // The second press of a pair asks the run for its text back, so it opens
+      // the run for rewriting instead of picking it up all over again.
+      if double {
+        self.edit_picked();
+        self.window.request_redraw();
+        return None;
       }
-      if self.tool == Tool::Select {
-        if let Some(grab) = grab_at(sel, p) {
-          self.mode = match grab {
-            Grab::Resize(handle) => Mode::Resize(handle, sel),
-            Grab::Move => Mode::Move(p),
-          };
-          return None;
-        }
+      self.mode = match handle {
+        Some(handle) => Mode::ResizeText {
+          index,
+          lifted: None,
+          handle,
+          origin: box_,
+        },
+        None => Mode::MoveText {
+          index,
+          lifted: None,
+          last: p,
+        },
+      };
+      self.window.request_redraw();
+      return None;
+    }
+    // A press that reaches no run at all is the only way to put one down.
+    self.picked = None;
+    if self.tool == Tool::Select {
+      if let Some(region) = self.region_at(p) {
+        self.mode = region;
+        self.window.request_redraw();
+        return None;
       }
     }
     self.mode = match self.tool {
-      Tool::Select => {
+      // A new region starts only where there is one to pick. A live backdrop is
+      // the whole screen already, so the select tool has nothing to start
+      // there, and a rubber band would shrink the live canvas to it.
+      Tool::Select if self.backdrop_kind.picks_region() => {
         self.selection = None;
         Mode::Rubber(p)
       }
-      Tool::Label => Mode::Type(String::new(), p),
+      Tool::Select => Mode::Idle,
+      Tool::Label => Mode::Type(Typing::new(
+        p,
+        self.size(Tool::Label),
+        active_color(self.palette_index),
+      )),
       tool => Mode::Draw(self.new_shape(tool, p), p),
     };
     if self.mode.stroking() {
@@ -663,6 +883,85 @@ impl Session {
     }
     self.window.request_redraw();
     None
+  }
+
+  fn double_clicked(&mut self, p: Point) -> bool {
+    let now = Instant::now();
+    let second = self.press.is_some_and(|(when, at)| {
+      is_double_click(now.duration_since(when), at, p)
+    });
+    self.press = Some((now, p));
+    second
+  }
+
+  fn region_at(&self, p: Point) -> Option<Mode> {
+    // A live backdrop is the whole screen, which is not a thing to move, so
+    // there the select tool is only ever a way of picking up what is on it.
+    let sel = self
+      .selection
+      .filter(|_| self.backdrop_kind.picks_region())?;
+    match hit_handle(sel, p, HANDLE_SLOP) {
+      Some(handle) => Some(Mode::ResizeRegion(handle, sel)),
+      None if sel.contains(p) => Some(Mode::MoveRegion(p)),
+      None => None,
+    }
+  }
+
+  fn text_at(&self, p: Point) -> Option<(usize, Rect)> {
+    self
+      .history
+      .shapes()
+      .iter()
+      .enumerate()
+      .rev()
+      .find_map(|(index, shape)| {
+        let Shape::Text { at, text, size, .. } = shape else {
+          return None;
+        };
+        let box_ = self.engine.bounds(text, *at, *size);
+        (!box_.is_empty() && box_.inflated(GRAB_SLOP).contains(p))
+          .then_some((index, box_))
+      })
+  }
+
+  fn picked_box(&self) -> Option<Rect> {
+    if let Some(Shape::Text { at, text, size, .. }) = self.mode.draft() {
+      return self.text_box(*at, text, *size);
+    }
+    let Shape::Text { at, text, size, .. } =
+      self.history.shape(self.picked?)?
+    else {
+      return None;
+    };
+    self.text_box(*at, text, *size)
+  }
+
+  fn text_box(&self, at: Point, text: &str, size: f32) -> Option<Rect> {
+    let box_ = self.engine.bounds(text, at, size);
+    (!box_.is_empty()).then_some(box_)
+  }
+
+  fn cursor_at(&self, p: Point) -> CursorIcon {
+    if let Some((index, box_)) = self.text_at(p) {
+      return match self.handle_on(index, box_, p) {
+        Some(handle) => resize_cursor(handle),
+        None => CursorIcon::Move,
+      };
+    }
+    if self.tool != Tool::Select {
+      return CursorIcon::default();
+    }
+    match self.region_at(p) {
+      Some(Mode::ResizeRegion(handle, _)) => resize_cursor(handle),
+      Some(Mode::MoveRegion(_)) => CursorIcon::Move,
+      _ => CursorIcon::default(),
+    }
+  }
+
+  fn handle_on(&self, index: usize, box_: Rect, p: Point) -> Option<Handle> {
+    (self.picked == Some(index))
+      .then(|| hit_handle(box_, p, HANDLE_SLOP))
+      .flatten()
   }
 
   fn new_shape(&self, tool: Tool, p: Point) -> Shape {
@@ -715,8 +1014,16 @@ impl Session {
       }
       render::Command::Undo => {
         if self.history.undo() {
-          self.replay();
-          self.window.request_redraw();
+          // Undo renumbers everything after the shape it dropped, so a pick
+          // that was pointing at that shape has to let go rather than land on
+          // whatever took its place.
+          if self
+            .picked
+            .is_some_and(|pick| pick >= self.history.shapes().len())
+          {
+            self.picked = None;
+          }
+          self.rebuild(self.bounds);
         }
         None
       }
@@ -749,16 +1056,25 @@ impl Session {
     self.base = Some(self.buffers.canvas.at().clone());
   }
 
-  fn ink_shape(&mut self, shape: &Shape) {
+  fn rebuild(&mut self, area: Rect) {
     self.snapshot();
-    let area = render::shape_area(Some(shape), &self.engine);
+    let Some(base) = &self.base else {
+      // Nothing was ever inked, so the canvas is still the capture and there is
+      // nothing to put back.
+      return;
+    };
     let Screen {
       canvas, backdrop, ..
     } = &mut self.buffers;
-    let canvas = canvas.at();
-    render::ink(canvas, shape, &self.engine);
-    render::dimmed_into(backdrop.at(), canvas);
-    self.repainted(area);
+    let laid = render::repaint(
+      canvas.at(),
+      backdrop.at(),
+      base,
+      self.history.shapes(),
+      area,
+      &self.engine,
+    );
+    self.repainted(laid);
   }
 
   fn ink_segment(&mut self, segment: Segment) {
@@ -771,44 +1087,71 @@ impl Session {
     self.repainted(area);
   }
 
-  fn replay(&mut self) {
-    let Some(base) = &self.base else {
-      // Nothing was ever inked, so the canvas is still the capture and undo has
-      // nothing to put back.
-      return;
+  fn lift_text(&mut self, index: usize) -> Option<Shape> {
+    let Shape::Text {
+      at,
+      text,
+      color,
+      size,
+    } = self.history.shape(index)?
+    else {
+      return None;
     };
-    let Screen {
-      canvas, backdrop, ..
-    } = &mut self.buffers;
-    let canvas = canvas.at();
-    canvas.data_mut().copy_from_slice(base.data());
-    for shape in self.history.shapes() {
-      render::ink(canvas, shape, &self.engine);
+    let shape = Shape::Text {
+      at: *at,
+      text: text.clone(),
+      color: *color,
+      size: *size,
+    };
+    // The damage has to be the ink and not the line the run sits on: a
+    // descender reaches below the line and a hook can reach left of it, and
+    // whatever is left of a letterform stays on the canvas for the rest of
+    // the session.
+    let area = render::shape_area(Some(&shape), &self.engine);
+    if let Some(Shape::Text { text, .. }) = self.history.shape_mut(index) {
+      text.clear();
     }
-    render::dimmed_into(backdrop.at(), canvas);
-    // Undo takes the whole picture back to an earlier state, so the frame has to
-    // be rebuilt from the top.
-    self.repainted(self.bounds);
+    self.rebuild(area);
+    Some(shape)
+  }
+
+  fn land_text(&mut self, index: usize, shape: Shape) {
+    let area = render::shape_area(Some(&shape), &self.engine);
+    if let Some(slot) = self.history.shape_mut(index) {
+      *slot = shape;
+    }
+    self.rebuild(area);
   }
 
   fn mouse_up(&mut self) {
-    // `Type` hands its buffer and anchor straight back: clicking while typing
-    // must keep the text, so that one mode survives the release.
     match mem::replace(&mut self.mode, Mode::Idle) {
       Mode::Rubber(_) => {
         self.selection = render::deliverable_region(self.selection);
       }
       Mode::Draw(draft, _) if draft.is_complete() => {
-        // A stroke is already on the ink, segment by segment. Inking it again
-        // here would composite the whole log over itself a second time.
-        if !draft.is_stroke() {
-          self.ink_shape(&draft);
-        }
+        let area = render::shape_area(Some(&draft), &self.engine);
+        let stroke = draft.is_stroke();
         self.history.push(draft);
+        // A stroke is already on the ink, segment by segment. Rebuilding it
+        // here would composite the whole log over itself a second time.
+        if !stroke {
+          self.rebuild(area);
+        }
       }
-      Mode::Type(buffer, anchor) => {
-        self.mode = Mode::Type(buffer, anchor);
+      // A run that never left the canvas is already where it belongs.
+      Mode::MoveText {
+        index,
+        lifted: Some(shape),
+        ..
       }
+      | Mode::ResizeText {
+        index,
+        lifted: Some(shape),
+        ..
+      } => self.land_text(index, shape),
+      // Typing hands its buffer and anchor straight back: placing a run of
+      // text is a click that opens it, so that one mode outlives the release.
+      Mode::Type(typing) => self.mode = Mode::Type(typing),
       _ => {}
     }
     self.window.request_redraw();
@@ -816,6 +1159,13 @@ impl Session {
 
   fn character(&mut self, ch: &str) -> Option<Outcome> {
     if ch.eq_ignore_ascii_case("c") && self.modifiers.control_key() {
+      // A run the pointer is in the middle of moving, or the one the caret is
+      // sitting in, is not on the canvas, so it has to land before the image is
+      // handed over.
+      if self.mode.dragging_text() {
+        self.mouse_up();
+      }
+      self.commit_typing();
       return self.deliver(Deliverable::Copy);
     }
     if self.mode.typing().is_none() && matches!(ch, "[" | "]") {
@@ -828,35 +1178,86 @@ impl Session {
   }
 
   fn type_char(&mut self, ch: &str) {
-    if let Mode::Type(buffer, _) = &mut self.mode {
-      buffer.push_str(ch);
-      self.window.request_redraw();
+    if let Mode::Type(typing) = &mut self.mode {
+      typing.buffer.push_str(ch);
+      typing.caret.restart(Instant::now());
     }
+    self.repaint_typing();
   }
 
   fn backspace(&mut self) {
-    if let Mode::Type(buffer, _) = &mut self.mode {
-      buffer.pop();
-      self.window.request_redraw();
+    if let Mode::Type(typing) = &mut self.mode {
+      typing.buffer.pop();
+      typing.caret.restart(Instant::now());
     }
+    self.repaint_typing();
   }
 
-  fn commit_label(&mut self) {
-    let Mode::Type(buffer, anchor) = &mut self.mode else {
+  fn press_enter(&mut self) {
+    if self.mode.typing().is_some() {
+      self.commit_typing();
+    } else if matches!(self.mode, Mode::Idle) && self.tool == Tool::Select {
+      self.edit_picked();
+    }
+    self.window.request_redraw();
+  }
+
+  fn commit_typing(&mut self) {
+    let Mode::Type(typing) = mem::replace(&mut self.mode, Mode::Idle) else {
       return;
     };
-    let label = Shape::Caption {
-      at: *anchor,
-      text: mem::take(buffer),
-      color: active_color(self.palette_index),
-      size: self.size(Tool::Label),
+    let label = Shape::Text {
+      at: typing.at,
+      text: typing.buffer,
+      color: typing.color,
+      size: typing.size,
     };
-    if label.is_complete() {
-      self.ink_shape(&label);
-      self.history.push(label);
+    let Some(index) = typing.editing else {
+      if label.is_complete() {
+        let area = render::shape_area(Some(&label), &self.engine);
+        self.history.push(label);
+        // A run that has just been written is picked straight away, so its
+        // box is there to press on without reaching for the select tool.
+        self.picked = Some(self.history.shapes().len() - 1);
+        self.rebuild(area);
+      }
+      return;
+    };
+    if !label.is_complete() {
+      // A run emptied out while it was being rewritten leaves nothing to
+      // draw, and nothing to put back if the session is undone to here.
+      self.history.remove(index);
+      self.picked = None;
+      return;
     }
-    self.mode = Mode::Idle;
-    self.window.request_redraw();
+    let area = render::shape_area(Some(&label), &self.engine);
+    if let Some(slot) = self.history.shape_mut(index) {
+      *slot = label;
+    }
+    self.rebuild(area);
+  }
+
+  fn edit_picked(&mut self) {
+    let Some(index) = self.picked else {
+      return;
+    };
+    let Some(Shape::Text {
+      at,
+      text,
+      color,
+      size,
+    }) = self.lift_text(index)
+    else {
+      return;
+    };
+    self.mode = Mode::Type(Typing {
+      buffer: text,
+      at,
+      size,
+      color,
+      editing: Some(index),
+      caret: Caret::new(Instant::now()),
+    });
   }
 
   #[inline(always)]
@@ -871,8 +1272,14 @@ impl Session {
     let tool = self.tool;
     let next = (self.size(tool) + delta).clamp(MIN_SIZE, MAX_SIZE);
     self.sizes[tool as usize] = next;
-    if let Mode::Draw(shape, _) = &mut self.mode {
-      shape.set_width(next);
+    // A stroke keeps the width it was started with; the rest take the new one
+    // mid-drag.
+    if let Mode::Draw(
+      Shape::Line { width, .. } | Shape::Outline { width, .. },
+      _,
+    ) = &mut self.mode
+    {
+      *width = next;
     }
     self.hint = Some((format_size(next), Instant::now() + HINT_DURATION));
     self.window.request_redraw();
@@ -987,23 +1394,72 @@ fn extend_draft(anchor: Point, draft: &mut Shape, p: Point) -> Option<Step> {
       *rect = new_rect;
       Some(Step::Repaint)
     }
-    Shape::Caption { .. } => {
-      unreachable!("a label is typed in Mode::Type, never dragged as a draft")
+    Shape::Text { .. } => {
+      unreachable!("a run of text is typed, never dragged as a draft")
     }
   }
 }
 
-#[derive(Clone, Copy, PartialEq, Debug)]
-enum Grab {
-  Resize(Handle),
-  Move,
+fn fixed_corner(
+  origin: Rect,
+  handle: Handle,
+  width: f32,
+  height: f32,
+) -> Point {
+  let (x, y) = match handle {
+    Handle::TopLeft => (origin.right() - width, origin.bottom() - height),
+    Handle::Top | Handle::TopRight => (origin.x, origin.bottom() - height),
+    Handle::Left | Handle::BottomLeft => (origin.right() - width, origin.y),
+    Handle::Right | Handle::Bottom | Handle::BottomRight => {
+      (origin.x, origin.y)
+    }
+  };
+  Point::new(x, y)
 }
 
-fn grab_at(sel: Rect, p: Point) -> Option<Grab> {
-  if let Some(handle) = hit_handle(sel, p, HANDLE_SLOP) {
-    return Some(Grab::Resize(handle));
+fn resize_text(
+  engine: &TextEngine,
+  text: &str,
+  origin: Rect,
+  handle: Handle,
+  target: Point,
+) -> (Point, f32) {
+  if origin.is_empty() {
+    return (Point::new(origin.x, origin.y), origin.h);
   }
-  sel.contains(p).then_some(Grab::Move)
+  let width = match handle {
+    Handle::TopLeft | Handle::Left | Handle::BottomLeft => {
+      origin.right() - target.x
+    }
+    Handle::TopRight | Handle::Right | Handle::BottomRight => {
+      target.x - origin.x
+    }
+    Handle::Top | Handle::Bottom => origin.w,
+  };
+  let height = match handle {
+    Handle::TopLeft | Handle::Top | Handle::TopRight => {
+      origin.bottom() - target.y
+    }
+    Handle::BottomLeft | Handle::Bottom | Handle::BottomRight => {
+      target.y - origin.y
+    }
+    Handle::Left | Handle::Right => origin.h,
+  };
+  let (across, down) = (width / origin.w, height / origin.h);
+  let factor = match handle {
+    Handle::Left | Handle::Right => across,
+    Handle::Top | Handle::Bottom => down,
+    _ if (across - 1.0).abs() >= (down - 1.0).abs() => across,
+    _ => down,
+  };
+  let size = (origin.h * factor).clamp(MIN_SIZE, MAX_SIZE);
+  let anchor = fixed_corner(origin, handle, engine.width(text, size), size);
+  (anchor, size)
+}
+
+fn is_double_click(elapsed: Duration, from: Point, to: Point) -> bool {
+  elapsed <= DOUBLE_CLICK
+    && from.distance_squared(to) <= DOUBLE_CLICK_SLOP * DOUBLE_CLICK_SLOP
 }
 
 fn resize_cursor(handle: Handle) -> CursorIcon {
@@ -1254,17 +1710,159 @@ mod tests {
 
   #[test]
   fn a_handle_wins_over_the_interior_it_overlaps() {
-    // The cursor under a point and the press that follows it both ask
-    // `grab_at`, so a point that sits inside the region but within reach of a
+    // The cursor under a point and the press that follows it both resolve what
+    // is under the pointer, so a point inside the region but within reach of a
     // handle has to come back as the same answer for both.
     let sel = Rect::new(100.0, 100.0, 100.0, 100.0);
-    assert_eq!(grab_at(sel, Point::new(150.0, 150.0)), Some(Grab::Move));
+    assert_eq!(hit_handle(sel, Point::new(150.0, 150.0), HANDLE_SLOP), None);
     assert_eq!(
-      grab_at(sel, Point::new(100.0, 150.0)),
-      Some(Grab::Resize(Handle::Left)),
+      hit_handle(sel, Point::new(100.0, 150.0), HANDLE_SLOP),
+      Some(Handle::Left),
       "a handle grabs the interior it overlaps"
     );
-    assert_eq!(grab_at(sel, Point::new(90.0, 150.0)), None);
+    assert!(
+      !sel.contains(Point::new(90.0, 150.0)),
+      "and nothing is held outside the region"
+    );
+  }
+
+  #[test]
+  fn a_run_of_text_takes_the_size_the_handle_drag_reports() {
+    let Ok(engine) = TextEngine::load() else {
+      return;
+    };
+    let (at, size, text) = (Point::new(40.0, 60.0), 20.0, "Hg");
+    let origin = engine.bounds(text, at, size);
+
+    // A handle taken back to where the drag began has to leave the run exactly
+    // where it found it, so a press on a handle without a drag does nothing.
+    for &handle in &HANDLES {
+      assert_eq!(
+        resize_text(
+          &engine,
+          text,
+          origin,
+          handle,
+          handle_anchor(origin, handle)
+        ),
+        (at, size),
+        "the {handle:?} handle has to leave the run where it found it"
+      );
+    }
+
+    // A corner leaves the one opposite it alone, and takes the scale from the
+    // way it was pulled further: as wide again is no change, as tall again is
+    // double.
+    assert_eq!(
+      resize_text(
+        &engine,
+        text,
+        origin,
+        Handle::BottomRight,
+        Point::new(origin.right(), origin.bottom() + origin.h),
+      ),
+      (at, 40.0)
+    );
+
+    // Every report of a drag is measured against the box the drag started on,
+    // so a corner pulled further and further keeps growing by the step the
+    // pointer took rather than chasing the box it just produced.
+    let mut walked = size;
+    for step in 1..=4 {
+      let target = Point::new(
+        origin.right() + origin.w * step as f32,
+        origin.bottom() + origin.h * step as f32,
+      );
+      let (_, next) =
+        resize_text(&engine, text, origin, Handle::BottomRight, target);
+      assert_eq!(
+        next,
+        (size * (1.0 + step as f32)).min(MAX_SIZE),
+        "step {step} of a corner drag has to be the scale the pointer asked \
+         for"
+      );
+      assert!(next >= walked, "and a drag that keeps going keeps growing");
+      walked = next;
+    }
+
+    // A side handle reads its own axis, ignores the other one, and grows the
+    // run out of the anchor it already had.
+    let across = Point::new(origin.right() + origin.w, origin.y - 100.0);
+    let resized = resize_text(&engine, text, origin, Handle::Right, across);
+    assert_eq!(resized.0, at);
+    assert!(resized.1 > size);
+
+    // A handle dragged past its anchor bottoms out rather than turning it
+    // inside out.
+    assert_eq!(
+      resize_text(
+        &engine,
+        text,
+        origin,
+        Handle::BottomRight,
+        handle_anchor(origin, Handle::TopLeft),
+      )
+      .1,
+      MIN_SIZE
+    );
+  }
+
+  #[test]
+  fn two_presses_make_a_pair_only_on_the_same_spot_inside_the_window() {
+    let at = Point::new(120.0, 80.0);
+    // The rule is the whole of a double click: the same place, inside the
+    // window. Anything else is a first press, so a run is only opened for
+    // rewriting by a gesture the user meant as one.
+    assert!(is_double_click(
+      Duration::from_millis(80),
+      at,
+      Point::new(122.0, 81.0)
+    ));
+    assert!(
+      is_double_click(DOUBLE_CLICK, at, at),
+      "the window is as long as it says"
+    );
+    assert!(
+      !is_double_click(DOUBLE_CLICK + Duration::from_millis(1), at, at),
+      "a press too late is a first press"
+    );
+    assert!(
+      !is_double_click(Duration::from_millis(80), at, Point::new(160.0, 80.0)),
+      "and so is one on the run next door"
+    );
+  }
+
+  #[test]
+  fn the_caret_holds_each_state_for_a_blink_and_a_keystroke_brings_it_back() {
+    let start = Instant::now();
+    let mut caret = Caret::new(start);
+    assert!(caret.lit, "a caret comes up lit");
+
+    // Nothing changes the caret until its time is up, so a frame redrawn for
+    // any other reason cannot leave it in the wrong state.
+    assert!(!caret.flip(start));
+    assert!(!caret.flip(start + CARET_BLINK / 2));
+    assert!(caret.lit);
+
+    assert!(caret.flip(start + CARET_BLINK), "then it goes dark");
+    assert!(!caret.lit);
+    assert!(
+      !caret.flip(start + CARET_BLINK + CARET_BLINK / 2),
+      "and stays dark for a whole blink"
+    );
+    assert!(caret.flip(start + 3 * CARET_BLINK), "until it comes back");
+    assert!(caret.lit);
+
+    // A keystroke starts the blink again from lit, so the caret is never dark
+    // while there is still typing going on.
+    caret.restart(start + 3 * CARET_BLINK);
+    assert!(caret.lit);
+    assert!(
+      !caret.flip(start + 3 * CARET_BLINK + Duration::from_millis(1)),
+      "and holds steady for a blink after the last keystroke"
+    );
+    assert!(caret.flip(start + 4 * CARET_BLINK), "then blinks as before");
+    assert!(!caret.lit);
   }
 
   #[test]

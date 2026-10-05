@@ -270,9 +270,11 @@ pub struct Scene<'a> {
   pub canvas: &'a Pixmap,
   pub bounds: Rect,
   pub selection: Option<Rect>,
+  pub picked: Option<Rect>,
   pub kind: Backdrop,
   pub draft: Option<&'a Shape>,
-  pub typing: Option<(Point, &'a str, f32)>,
+  pub typing: Option<(Point, &'a str, f32, [u8; 3])>,
+  pub caret: bool,
   pub palette_index: usize,
   pub chrome: &'a Chrome,
   pub hotspot: Option<Hotspot>,
@@ -283,18 +285,20 @@ pub struct Scene<'a> {
 #[derive(Debug, PartialEq)]
 pub struct Shown {
   selection: Option<Rect>,
+  picked: Option<Rect>,
   chrome: Chrome,
   hotspot: Option<Hotspot>,
   hint: Option<String>,
   palette: usize,
   draft: Option<Shape>,
-  typing: Option<(Point, String, f32)>,
+  typing: Option<(Point, String, f32, [u8; 3])>,
 }
 
 impl Shown {
   pub fn capture(scene: &Scene) -> Self {
     Self {
       selection: scene.selection,
+      picked: scene.picked,
       chrome: scene.chrome.clone(),
       hotspot: scene.hotspot,
       hint: scene.hint.map(str::to_string),
@@ -302,7 +306,7 @@ impl Shown {
       draft: scene.draft.cloned(),
       typing: scene
         .typing
-        .map(|(at, buffer, size)| (at, buffer.to_string(), size)),
+        .map(|(at, buffer, size, color)| (at, buffer.to_string(), size, color)),
     }
   }
 
@@ -316,6 +320,10 @@ impl Shown {
     if self.selection != next.selection {
       area = area.union(region_area(self.selection, bounds, engine));
       area = area.union(region_area(next.selection, bounds, engine));
+    }
+    if self.picked != next.picked {
+      area = area.union(picked_area(self.picked));
+      area = area.union(picked_area(next.picked));
     }
     // A new colour repaints the panels as well, because the swatch on the
     // colour button is the one thing on them that takes it.
@@ -349,22 +357,29 @@ impl Shown {
     )
   }
 
-  fn typed(&self) -> Option<(Point, &str, f32)> {
+  fn typed(&self) -> Option<(Point, &str, f32, [u8; 3])> {
     self
       .typing
       .as_ref()
-      .map(|(at, buffer, size)| (*at, buffer.as_str(), *size))
+      .map(|(at, buffer, size, color)| (*at, buffer.as_str(), *size, *color))
   }
 }
 
 fn region_area(sel: Option<Rect>, bounds: Rect, engine: &TextEngine) -> Rect {
   match sel {
     Some(sel) => sel
-      .union(bounding(&outline_boxes(sel)))
-      .union(bounding(&handle_boxes(sel)))
+      .union(framed_area(sel))
       .union(badge_rect(sel, bounds, engine).inflated(EDGE)),
     None => Rect::ZERO,
   }
+}
+
+fn framed_area(sel: Rect) -> Rect {
+  bounding(&outline_boxes(sel)).union(bounding(&handle_boxes(sel)))
+}
+
+fn picked_area(sel: Option<Rect>) -> Rect {
+  sel.map(framed_area).unwrap_or(Rect::ZERO)
 }
 
 fn outline_boxes(sel: Rect) -> [Rect; 4] {
@@ -428,16 +443,60 @@ pub fn shape_area(shape: Option<&Shape>, engine: &TextEngine) -> Rect {
     Some(Shape::Outline { rect, width, .. }) => {
       rect.inflated(width * 0.5 + 1.0)
     }
-    Some(Shape::Caption { at, text, size, .. }) => {
-      engine.inked(text, *at, *size)
-    }
+    Some(Shape::Text { at, text, size, .. }) => engine.inked(text, *at, *size),
     None => Rect::ZERO,
   }
 }
 
-fn typed_area(typing: Option<(Point, &str, f32)>, engine: &TextEngine) -> Rect {
+pub fn repaint(
+  canvas: &mut Pixmap,
+  backdrop: &mut Pixmap,
+  base: &Pixmap,
+  shapes: &[Shape],
+  area: Rect,
+  engine: &TextEngine,
+) -> Rect {
+  let boxes: Vec<Rect> = shapes
+    .iter()
+    .map(|shape| shape_area(Some(shape), engine))
+    .collect();
+  let mut region = area;
+  loop {
+    let grown = shapes.iter().zip(&boxes).fold(
+      region,
+      |region, (shape, box_)| match box_.overlaps(region) && shape.blends() {
+        true => region.union(*box_),
+        false => region,
+      },
+    );
+    if grown == region {
+      break;
+    }
+    region = grown;
+  }
+
+  let (x, y, width, height) =
+    region_pixels(region, canvas.width(), canvas.height());
+  if width == 0 || height == 0 {
+    return Rect::ZERO;
+  }
+  let region = Rect::new(x as f32, y as f32, width as f32, height as f32);
+  copy_region(canvas, base, (x, y), (x, y), (width, height));
+  for (shape, box_) in shapes.iter().zip(&boxes) {
+    if box_.overlaps(region) {
+      ink(canvas, shape, engine);
+    }
+  }
+  dim_region_into(backdrop, canvas, region);
+  region
+}
+
+pub fn typed_area(
+  typing: Option<(Point, &str, f32, [u8; 3])>,
+  engine: &TextEngine,
+) -> Rect {
   match typing {
-    Some((at, buffer, size)) => {
+    Some((at, buffer, size, _)) => {
       let x = at.x + engine.width(buffer, size);
       // The caret is a round-capped stroke, so like every other stroke it
       // paints half its width past each end, the one above the anchor
@@ -480,6 +539,7 @@ pub fn paint(pm: &mut Pixmap, scene: &Scene, damage: Rect) {
     .unwrap_or(Rect::ZERO)];
   let draft = [shape_area(scene.draft, engine)];
   let typing = [typed_area(scene.typing, engine)];
+  let picked = [picked_area(scene.picked)];
   let panels = [panels_area(
     scene.chrome,
     scene.hotspot,
@@ -495,6 +555,7 @@ pub fn paint(pm: &mut Pixmap, scene: &Scene, damage: Rect) {
     &badge[..],
     &draft[..],
     &typing[..],
+    &picked[..],
     &panels[..],
   ] {
     if touches(piece, area) {
@@ -536,23 +597,26 @@ pub fn paint(pm: &mut Pixmap, scene: &Scene, damage: Rect) {
     }
   }
   if inside(&typing, area) {
-    if let Some((at, buffer, size)) = scene.typing {
-      engine.draw(
-        pm,
-        buffer,
-        at.x,
-        at.y,
-        size,
-        active_color(scene.palette_index),
-      );
-      let caret_x = at.x + engine.width(buffer, size);
-      draw::polyline(
-        pm,
-        &[Point::new(caret_x, at.y), Point::new(caret_x, at.y + size)],
-        [255, 255, 255],
-        CARET_WIDTH,
-        255,
-      );
+    if let Some((at, buffer, size, color)) = scene.typing {
+      engine.draw(pm, buffer, at.x, at.y, size, color);
+      // The caret is dark for the half of the blink it is not lit for, which
+      // is the same as not painting it: the text underneath stays.
+      if scene.caret {
+        let caret_x = at.x + engine.width(buffer, size);
+        draw::polyline(
+          pm,
+          &[Point::new(caret_x, at.y), Point::new(caret_x, at.y + size)],
+          [255, 255, 255],
+          CARET_WIDTH,
+          255,
+        );
+      }
+    }
+  }
+  if inside(&picked, area) {
+    if let Some(box_) = scene.picked {
+      draw::dashed_rect(pm, box_, [255, 255, 255]);
+      draw_handles(pm, box_);
     }
   }
   if inside(&panels, area) {
@@ -724,7 +788,7 @@ pub(crate) fn ink(pm: &mut Pixmap, shape: &Shape, engine: &TextEngine) {
     Shape::Outline { rect, color, width } => {
       draw::rect_stroke(pm, *rect, *color, *width, 255);
     }
-    Shape::Caption {
+    Shape::Text {
       at,
       text,
       color,
@@ -1126,7 +1190,7 @@ mod tests {
     assert!(!find(&chrome, Command::Undo).enabled);
     assert!(find(&chrome, Command::Deliver(Deliverable::Copy)).enabled);
 
-    history.push(Shape::Caption {
+    history.push(Shape::Text {
       at: Point::new(5.0, 5.0),
       text: "x".to_string(),
       color: [0, 0, 0],
@@ -1164,7 +1228,7 @@ mod tests {
     // still has to work.
     let sel = Rect::new(10.0, 10.0, 200.0, 150.0);
     let mut history = History::default();
-    history.push(Shape::Caption {
+    history.push(Shape::Text {
       at: Point::new(5.0, 5.0),
       text: "x".to_string(),
       color: [0, 0, 0],
@@ -1429,9 +1493,11 @@ mod tests {
       canvas: &canvas,
       bounds,
       selection,
+      picked: None,
       kind: Backdrop::Frozen,
       draft: Some(&draft),
       typing: None,
+      caret: false,
       palette_index: 0,
       chrome: &chrome,
       hotspot: None,
@@ -1462,9 +1528,11 @@ mod tests {
       canvas,
       bounds: Rect::new(0.0, 0.0, size.0 as f32, size.1 as f32),
       selection,
+      picked: None,
       kind: Backdrop::Frozen,
       draft: None,
       typing: None,
+      caret: false,
       palette_index: 0,
       chrome,
       hotspot: None,
@@ -1565,6 +1633,285 @@ mod tests {
     );
   }
 
+  fn painted_in(
+    pm: &Pixmap,
+    size: (u32, u32),
+    box_: Rect,
+    rgb: [u8; 3],
+  ) -> usize {
+    let (x, y, width, height) = region_pixels(box_, size.0, size.1);
+    (0..height)
+      .flat_map(|row| (0..width).map(move |col| (col, row)))
+      .filter(|&(col, row)| {
+        let i = ((y + row) * size.0 + x + col) as usize * 4;
+        pm.data()[i..i + 3] == rgb
+      })
+      .count()
+  }
+
+  #[test]
+  fn repaint_puts_a_moved_run_where_it_went_and_takes_nothing_with_it() {
+    let Ok(engine) = TextEngine::load() else {
+      return;
+    };
+    const SIZE: (u32, u32) = (300, 200);
+    const WHITE: [u8; 3] = [255, 255, 255];
+    const RED: [u8; 3] = [239, 68, 68];
+    let mut base = Pixmap::new(SIZE.0, SIZE.1).unwrap();
+    base
+      .data_mut()
+      .as_chunks_mut::<4>()
+      .0
+      .iter_mut()
+      .for_each(|px| px.copy_from_slice(&[40, 60, 80, 255]));
+
+    let written = |x: f32| Shape::Text {
+      at: Point::new(x, 40.0),
+      text: "movable".to_string(),
+      color: WHITE,
+      size: 20.0,
+    };
+    let stroke = Shape::Line {
+      from: Point::new(10.0, 46.0),
+      to: Point::new(290.0, 46.0),
+      color: RED,
+      width: 4.0,
+      arrow: false,
+    };
+    let was = shape_area(Some(&written(20.0)), &engine);
+    let now = shape_area(Some(&written(160.0)), &engine);
+
+    let mut canvas = base.clone();
+    let mut backdrop = dimmed(&base);
+    let whole = Rect::new(0.0, 0.0, SIZE.0 as f32, SIZE.1 as f32);
+    repaint(
+      &mut canvas,
+      &mut backdrop,
+      &base,
+      &[written(20.0), stroke.clone()],
+      whole,
+      &engine,
+    );
+    assert!(
+      painted_in(&canvas, SIZE, was, WHITE) > 0,
+      "the run has to be written where it was left, {was:?}"
+    );
+
+    repaint(
+      &mut canvas,
+      &mut backdrop,
+      &base,
+      &[written(160.0), stroke],
+      was.union(now),
+      &engine,
+    );
+    assert_eq!(
+      painted_in(&canvas, SIZE, was, WHITE),
+      0,
+      "and it has to leave {was:?} clear once it has moved"
+    );
+    assert!(
+      painted_in(&canvas, SIZE, now, WHITE) > 0,
+      "the run has to show up where it was moved to, {now:?}"
+    );
+    assert!(
+      painted_in(&canvas, SIZE, was.union(now), RED) > 0,
+      "the stroke it moved across has to survive the move"
+    );
+  }
+
+  #[test]
+  fn a_rebuild_leaves_translucent_ink_exactly_as_it_was_laid() {
+    // A rebuild lays every shape that reaches into the box down again. Ink
+    // laid down twice is darker than ink laid once, so the marker under the
+    // box has to go back to the capture whole rather than have its ink put
+    // over its own.
+    let Ok(engine) = TextEngine::load() else {
+      return;
+    };
+    let size = (400u32, 200u32);
+    let mut base = Pixmap::new(size.0, size.1).unwrap();
+    base
+      .data_mut()
+      .as_chunks_mut::<4>()
+      .0
+      .iter_mut()
+      .for_each(|px| px.copy_from_slice(&[40, 60, 80, 255]));
+    let marker = Shape::Stroke {
+      points: vec![Point::new(10.0, 120.0), Point::new(380.0, 120.0)],
+      color: [250, 204, 21],
+      width: 16.0,
+      marker: true,
+    };
+    let text = Shape::Text {
+      at: Point::new(150.0, 108.0),
+      text: "over the marker".to_string(),
+      color: [255, 255, 255],
+      size: 20.0,
+    };
+
+    // The ground as one pass over both shapes lays it, which is what the
+    // rebuild has to arrive at.
+    let mut once = base.clone();
+    ink(&mut once, &marker, &engine);
+    ink(&mut once, &text, &engine);
+    let mut rebuilt = base.clone();
+    ink(&mut rebuilt, &marker, &engine);
+    let mut backdrop = dimmed(&base);
+    let laid = repaint(
+      &mut rebuilt,
+      &mut backdrop,
+      &base,
+      &[marker.clone(), text.clone()],
+      shape_area(Some(&text), &engine),
+      &engine,
+    );
+
+    assert_eq!(
+      first_difference(rebuilt.data(), once.data()),
+      None,
+      "the marker has to come out of the rebuild exactly as it went in"
+    );
+    assert!(
+      laid.contains_rect(shape_area(Some(&marker), &engine)),
+      "and the caller has to repaint all of it, got {laid:?}"
+    );
+  }
+
+  #[test]
+  fn the_text_being_written_is_drawn_in_the_colour_it_will_land_in() {
+    let Ok(engine) = TextEngine::load() else {
+      return;
+    };
+    let bounds = Rect::new(0.0, 0.0, 200.0, 120.0);
+    let canvas = Pixmap::new(200, 120).unwrap();
+    let backdrop = dimmed(&canvas);
+    let chrome = Chrome::new(Backdrop::Frozen);
+    let mut scene =
+      scene_of((200, 120), &canvas, &backdrop, &chrome, &engine, None);
+    // The active colour is the palette's first entry, so a preview drawn in
+    // the wrong one is easy to tell from the right one.
+    scene.typing = Some((Point::new(20.0, 70.0), "Hg", 20.0, [0, 255, 0]));
+
+    let mut pm = Pixmap::new(200, 120).unwrap();
+    paint(&mut pm, &scene, bounds);
+    let lit = |rgb: [u8; 3]| {
+      pm.data()
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|px| [px[0], px[1], px[2]] == rgb)
+        .count()
+    };
+    assert!(lit([0, 255, 0]) > 0, "the preview has to show at all");
+    assert_eq!(
+      lit(active_color(scene.palette_index)),
+      0,
+      "and it has to be in the colour the run will land in"
+    );
+  }
+
+  #[test]
+  fn rebuilding_a_runs_own_ink_takes_every_letterform_with_it() {
+    // The line a run sits on does not hold its ink: a descender reaches below
+    // the line and a hook can reach left of it, so the box a rebuild is asked
+    // for has to be the ink and not the line.
+    let Ok(engine) = TextEngine::load() else {
+      return;
+    };
+    let screen = (200u32, 120u32);
+    let mut base = Pixmap::new(screen.0, screen.1).unwrap();
+    base
+      .data_mut()
+      .as_chunks_mut::<4>()
+      .0
+      .iter_mut()
+      .for_each(|px| px.copy_from_slice(&[20, 30, 40, 255]));
+
+    let run = Shape::Text {
+      at: Point::new(40.0, 40.0),
+      text: "jjgjpqy".to_string(),
+      color: [255, 255, 255],
+      size: 24.0,
+    };
+    let Shape::Text {
+      at, ref text, size, ..
+    } = run
+    else {
+      panic!("a run is a text shape")
+    };
+    let line = engine.bounds(text, at, size);
+    let lettered = shape_area(Some(&run), &engine);
+    assert!(
+      !line.contains_rect(lettered),
+      "the test is only worth anything if the line misses the ink: \
+       {line:?} vs {lettered:?}"
+    );
+
+    let mut canvas = base.clone();
+    ink(&mut canvas, &run, &engine);
+    let mut backdrop = dimmed(&base);
+    // The run as a lift leaves it: on the canvas, but out of the history.
+    repaint(&mut canvas, &mut backdrop, &base, &[], lettered, &engine);
+
+    assert_eq!(
+      painted_in(
+        &canvas,
+        screen,
+        Rect::new(0.0, 0.0, 200.0, 120.0),
+        [255, 255, 255]
+      ),
+      0,
+      "a lifted run must leave nothing of itself on the canvas"
+    );
+  }
+
+  #[test]
+  fn a_picked_box_that_moves_damages_both_places_it_was() {
+    let Ok(engine) = TextEngine::load() else {
+      return;
+    };
+    let canvas = Pixmap::new(600, 600).unwrap();
+    let backdrop = dimmed(&canvas);
+    let bounds = Rect::new(0.0, 0.0, 600.0, 600.0);
+    let sel = Rect::new(20.0, 20.0, 80.0, 80.0);
+    let mut chrome = Chrome::new(Backdrop::Frozen);
+    build(
+      &mut chrome,
+      Some(sel),
+      bounds,
+      Tool::Select,
+      &History::default(),
+      true,
+      Backdrop::Frozen,
+    );
+    let mut scene =
+      scene_of((600, 600), &canvas, &backdrop, &chrome, &engine, Some(sel));
+
+    let from = Rect::new(100.0, 100.0, 60.0, 24.0);
+    let to = Rect::new(300.0, 300.0, 60.0, 24.0);
+    scene.picked = Some(from);
+    let before = Shown::capture(&scene);
+    scene.picked = Some(to);
+    let after = Shown::capture(&scene);
+
+    let area = before.settled_from(&after, bounds, &engine);
+    assert!(
+      area.contains_rect(framed_area(from))
+        && area.contains_rect(framed_area(to)),
+      "the frame and its handles have to be painted out where they were and \
+       in where they are, got {area:?}"
+    );
+    scene.picked = None;
+    let dropped = Shown::capture(&scene);
+    assert!(
+      before
+        .settled_from(&dropped, bounds, &engine)
+        .contains_rect(framed_area(from)),
+      "putting a run down has to take its frame off the screen"
+    );
+  }
+
   fn busy_scene(sel: Rect, bounds: Rect) -> (Pixmap, Pixmap, Chrome) {
     let mut canvas = Pixmap::new(400, 400).unwrap();
     for (index, pixel) in canvas
@@ -1580,7 +1927,7 @@ mod tests {
     let backdrop = dimmed(&canvas);
     let mut chrome = Chrome::new(Backdrop::Frozen);
     let mut history = History::default();
-    history.push(Shape::Caption {
+    history.push(Shape::Text {
       at: Point::new(40.0, 60.0),
       text: "note".to_string(),
       color: [255, 255, 255],
@@ -1724,7 +2071,8 @@ mod tests {
     let at = Point::new(100.0, 70.0);
     let mut scene =
       scene_of((200, 120), &canvas, &backdrop, &chrome, &engine, None);
-    scene.typing = Some((at, "", 20.0));
+    scene.typing = Some((at, "", 20.0, [255, 255, 255]));
+    scene.caret = true;
 
     let mut pm = Pixmap::new(200, 120).unwrap();
     paint(&mut pm, &scene, bounds);
