@@ -12,7 +12,6 @@ const BADGE_GAP: f32 = 5.0;
 const BADGE_PAD: f32 = 6.0;
 const BADGE_H: f32 = BADGE_TEXT + 7.0;
 
-/// The four dashed edges drawn around a selected region.
 pub(super) fn outline_boxes(sel: Rect) -> [Rect; 4] {
   let edge = sel.inflated(EDGE);
   [
@@ -23,7 +22,6 @@ pub(super) fn outline_boxes(sel: Rect) -> [Rect; 4] {
   ]
 }
 
-/// The eight drag handles drawn at the corners and sides of a selection.
 pub(super) fn handle_boxes(sel: Rect) -> [Rect; 8] {
   HANDLES.map(|handle| handle_square(sel, handle).inflated(EDGE))
 }
@@ -45,8 +43,6 @@ pub(super) fn badge_label(sel: Rect) -> String {
   format!("{}x{}", sel.w.round() as i64, sel.h.round() as i64)
 }
 
-/// Where the size readout sits for a selection: above it, or below when there
-/// is no room above.
 pub(super) fn badge_rect(sel: Rect, bounds: Rect, engine: &TextEngine) -> Rect {
   let box_w = engine.width(&badge_label(sel), BADGE_TEXT) + BADGE_PAD * 2.0;
   let mut bx = sel.x;

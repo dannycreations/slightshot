@@ -1,10 +1,10 @@
 use super::{
   chrome::{tooltip_rect, Chrome, Hotspot},
   frame::{badge_rect, handle_boxes, outline_boxes, EDGE},
-  Scene, CARET_WIDTH,
+  Run, Scene, CARET_WIDTH,
 };
 use crate::{
-  annotate::Shape,
+  annotate::{stroke_bounds, Shape},
   geom::{Point, Rect},
   text::TextEngine,
 };
@@ -13,10 +13,6 @@ use crate::{
 #[path = "damage_test.rs"]
 mod damage_test;
 
-/// Everything the last frame put on screen, held so that the next frame can be
-/// told only the box that changed. Without it every repaint would have to
-/// rebuild the whole picture, because a shape the user just moved still sits on
-/// the canvas where it used to be.
 #[derive(Debug, PartialEq)]
 pub struct Shown {
   selection: Option<Rect>,
@@ -34,18 +30,17 @@ impl Shown {
     Self {
       selection: scene.selection,
       picked: scene.picked,
-      chrome: scene.chrome.clone(),
+      chrome: *scene.chrome,
       hotspot: scene.hotspot,
       hint: scene.hint.map(str::to_string),
       palette: scene.palette_index,
       draft: scene.draft.cloned(),
       typing: scene
         .typing
-        .map(|(at, buffer, size, color)| (at, buffer.to_string(), size, color)),
+        .map(|run| (run.at, run.text.to_owned(), run.size, run.color)),
     }
   }
 
-  /// The box to repaint so that `next` replaces `self` on screen.
   pub fn settled_from(
     &self,
     next: &Shown,
@@ -99,11 +94,13 @@ impl Shown {
     )
   }
 
-  fn typed(&self) -> Option<(Point, &str, f32, [u8; 3])> {
-    self
-      .typing
-      .as_ref()
-      .map(|(at, buffer, size, color)| (*at, buffer.as_str(), *size, *color))
+  fn typed(&self) -> Option<Run<'_>> {
+    self.typing.as_ref().map(|(at, text, size, color)| Run {
+      at: *at,
+      text,
+      size: *size,
+      color: *color,
+    })
   }
 }
 
@@ -132,7 +129,7 @@ pub(super) fn panels_area(
   engine: &TextEngine,
 ) -> Rect {
   let mut area = Rect::ZERO;
-  for button in chrome.tools.iter().chain(&chrome.actions) {
+  for button in chrome.buttons() {
     // A button that was never laid out sits on `Rect::ZERO`, which is how the
     // chrome says "no button here". Inflating that sentinel would turn it
     // into a live box at the origin, and the union would then stretch every
@@ -149,40 +146,31 @@ pub(super) fn panels_area(
 
 pub fn shape_area(shape: Option<&Shape>, engine: &TextEngine) -> Rect {
   match shape {
-    // Half the width past each end for the round caps, plus the
-    // antialiased pixel outside them.
     Some(Shape::Stroke { points, width, .. }) => {
-      Rect::around(points).inflated(width * 0.5 + 1.0)
+      stroke_bounds(Rect::around(points), *width)
     }
     Some(Shape::Line {
       from, to, width, ..
-    }) => Rect::spanning(*from, *to).inflated(width * 0.5 + 1.0),
-    Some(Shape::Outline { rect, width, .. }) => {
-      rect.inflated(width * 0.5 + 1.0)
-    }
+    }) => stroke_bounds(Rect::spanning(*from, *to), *width),
+    Some(Shape::Outline { rect, width, .. }) => stroke_bounds(*rect, *width),
     Some(Shape::Text { at, text, size, .. }) => engine.inked(text, *at, *size),
     None => Rect::ZERO,
   }
 }
 
-pub fn typed_area(
-  typing: Option<(Point, &str, f32, [u8; 3])>,
-  engine: &TextEngine,
-) -> Rect {
-  match typing {
-    Some((at, buffer, size, _)) => {
-      let x = at.x + engine.width(buffer, size);
-      // The caret is a round-capped stroke, so like every other stroke it
-      // paints half its width past each end, the one above the anchor
-      // included, plus the antialiased pixel outside that. A box that stops at
-      // the anchor would leave every cap behind as the caret steps right.
-      let caret =
-        Rect::spanning(Point::new(x, at.y), Point::new(x, at.y + size))
-          .inflated(CARET_WIDTH * 0.5 + 1.0);
-      engine.inked(buffer, at, size).union(caret)
-    }
-    None => Rect::ZERO,
-  }
+pub fn typed_area(typing: Option<Run<'_>>, engine: &TextEngine) -> Rect {
+  let Some(run) = typing else {
+    return Rect::ZERO;
+  };
+  let x = run.at.x + engine.width(run.text, run.size);
+  // The caret claims its box as a stroke does, the cap above the anchor
+  // included. A box that stopped at the anchor would leave every cap behind
+  // as the caret steps right.
+  let caret = stroke_bounds(
+    Rect::spanning(Point::new(x, run.at.y), Point::new(x, run.at.y + run.size)),
+    CARET_WIDTH,
+  );
+  engine.inked(run.text, run.at, run.size).union(caret)
 }
 
 pub(super) fn touches(piece: &[Rect], area: Rect) -> bool {

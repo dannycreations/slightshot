@@ -36,7 +36,7 @@ impl Icon {
   ) {
     let x = (center.x - box_size * 0.5).round() as i32;
     let y = (center.y - box_size * 0.5).round() as i32;
-    render_tinted_sprite(self, pm, color, box_size, x, y);
+    blit_tinted(self, pm, color, box_size, x, y);
   }
 }
 
@@ -72,7 +72,7 @@ fn create_tinted_sprite(icon: Icon, color: [u8; 3], box_size: f32) -> Pixmap {
   tinted
 }
 
-fn render_tinted_sprite(
+fn blit_tinted(
   icon: Icon,
   pm: &mut Pixmap,
   color: [u8; 3],

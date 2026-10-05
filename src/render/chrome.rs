@@ -78,7 +78,7 @@ const fn button(command: Command, icon: draw::Icon) -> Button {
   }
 }
 
-const TOOL_BUTTONS: [Button; 8] = [
+const TOOL_BUTTONS: [Button; 9] = [
   button(Command::Tool(Tool::Pen), draw::Icon::Pen),
   button(Command::Tool(Tool::Line), draw::Icon::Line),
   button(Command::Tool(Tool::Arrow), draw::Icon::Arrow),
@@ -87,7 +87,10 @@ const TOOL_BUTTONS: [Button; 8] = [
   button(Command::Tool(Tool::Label), draw::Icon::Letter),
   button(Command::NextColor, draw::Icon::Letter),
   button(Command::Undo, draw::Icon::Undo),
+  button(Command::Close, draw::Icon::Close),
 ];
+
+const FROZEN_TOOLS: usize = 8;
 
 const ACTION_BUTTONS: [Button; 4] = [
   button(Command::Deliver(Deliverable::Upload), draw::Icon::Upload),
@@ -96,22 +99,26 @@ const ACTION_BUTTONS: [Button; 4] = [
   button(Command::Close, draw::Icon::Close),
 ];
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Chrome {
-  pub tools: Vec<Button>,
-  pub actions: Vec<Button>,
+  pub tools: [Button; TOOL_BUTTONS.len()],
+  pub actions: [Button; ACTION_BUTTONS.len()],
 }
 
 impl Chrome {
-  pub fn new(backdrop: Backdrop) -> Self {
-    let mut tools = TOOL_BUTTONS.to_vec();
-    if !backdrop.picks_region() {
-      tools.push(button(Command::Close, draw::Icon::Close));
-    }
+  pub fn new() -> Self {
     Self {
-      tools,
-      actions: ACTION_BUTTONS.to_vec(),
+      tools: TOOL_BUTTONS,
+      actions: ACTION_BUTTONS,
     }
+  }
+
+  pub(super) fn buttons(&self) -> impl Iterator<Item = &Button> {
+    self.tools.iter().chain(&self.actions)
+  }
+
+  pub(super) fn buttons_mut(&mut self) -> impl Iterator<Item = &mut Button> {
+    self.tools.iter_mut().chain(&mut self.actions)
   }
 
   fn hovered(&self, hotspot: Option<Hotspot>) -> Option<(&Button, Side)> {
@@ -161,7 +168,7 @@ pub fn build(
     backdrop.picks_region() && deliverable_region(selection).is_some();
   let can_undo = history.can_undo();
 
-  for b in chrome.tools.iter_mut().chain(&mut chrome.actions) {
+  for b in chrome.buttons_mut() {
     b.enabled = b.command.enabled(ready, can_undo);
     b.active = matches!(b.command, Command::Tool(active) if active == tool);
     b.area = Rect::ZERO;
@@ -170,9 +177,14 @@ pub fn build(
   let Some(sel) = selection.filter(|_| show_chrome) else {
     return;
   };
-  layout_panel(&mut chrome.tools, sel, bounds, Panel::Column { live });
+  let column = if live {
+    TOOL_BUTTONS.len()
+  } else {
+    FROZEN_TOOLS
+  };
+  layout_column(&mut chrome.tools[..column], sel, bounds, live);
   if !live {
-    layout_panel(&mut chrome.actions, sel, bounds, Panel::Row);
+    layout_row(&mut chrome.actions, sel, bounds);
   }
 }
 
@@ -187,60 +199,58 @@ pub fn hotspot_at(chrome: &Chrome, p: Point) -> Option<Hotspot> {
 }
 
 #[derive(Clone, Copy)]
-enum Panel {
-  Column { live: bool },
-  Row,
+enum Axis {
+  Across,
+  Down,
 }
 
-fn layout_panel(buttons: &mut [Button], sel: Rect, bounds: Rect, panel: Panel) {
-  let count = buttons.len() as f32;
-  let long = count * BUTTON + (count - 1.0) * TOOL_GAP + PANEL_PAD * 2.0;
-  let short = BUTTON + PANEL_PAD * 2.0;
+fn panel_span(count: usize) -> f32 {
+  let count = count as f32;
+  count * BUTTON + (count - 1.0) * TOOL_GAP + PANEL_PAD * 2.0
+}
 
-  let Panel::Column { live } = panel else {
-    let (width, height) = (long, short);
-    let x = (sel.right() - width).max(bounds.x);
-    let mut y = sel.bottom() + ROW_GAP;
-    if y + height > bounds.bottom() {
-      y = sel.y - height - ROW_GAP;
-    }
-    let y = clamp_span(y, height, bounds.y, bounds.bottom());
-    lay_out_buttons(buttons, (x, y), Panel::Row);
-    return;
-  };
-
-  let (width, height) = (short, long);
+fn layout_column(buttons: &mut [Button], sel: Rect, bounds: Rect, live: bool) {
+  let width = BUTTON + PANEL_PAD * 2.0;
+  let height = panel_span(buttons.len());
   let mut x = sel.right() + COLUMN_GAP;
   if x + width > bounds.right() {
     x = sel.right() - width - COLUMN_GAP;
   }
   let x = clamp_span(x, width, bounds.x, bounds.right());
-  let y = if live {
-    clamp_span(
-      sel.center().y - height * 0.5,
-      height,
-      bounds.y + SCREEN_MARGIN,
-      bounds.bottom() - SCREEN_MARGIN,
-    )
+  let wanted = if live {
+    sel.center().y - height * 0.5
   } else {
-    clamp_span(
-      sel.bottom() - height,
-      height,
-      bounds.y + SCREEN_MARGIN,
-      bounds.bottom() - SCREEN_MARGIN,
-    )
+    sel.bottom() - height
   };
-  lay_out_buttons(buttons, (x, y), Panel::Column { live });
+  let y = clamp_span(
+    wanted,
+    height,
+    bounds.y + SCREEN_MARGIN,
+    bounds.bottom() - SCREEN_MARGIN,
+  );
+  lay_out_buttons(buttons, (x, y), Axis::Down);
 }
 
-fn lay_out_buttons(buttons: &mut [Button], at: (f32, f32), panel: Panel) {
+fn layout_row(buttons: &mut [Button], sel: Rect, bounds: Rect) {
+  let width = panel_span(buttons.len());
+  let height = BUTTON + PANEL_PAD * 2.0;
+  let x = (sel.right() - width).max(bounds.x);
+  let mut y = sel.bottom() + ROW_GAP;
+  if y + height > bounds.bottom() {
+    y = sel.y - height - ROW_GAP;
+  }
+  let y = clamp_span(y, height, bounds.y, bounds.bottom());
+  lay_out_buttons(buttons, (x, y), Axis::Across);
+}
+
+fn lay_out_buttons(buttons: &mut [Button], at: (f32, f32), axis: Axis) {
   let step = BUTTON + TOOL_GAP;
   let (x, y) = at;
   for (index, button) in buttons.iter_mut().enumerate() {
     let offset = index as f32 * step;
-    let (dx, dy) = match panel {
-      Panel::Column { .. } => (0.0, offset),
-      Panel::Row => (offset, 0.0),
+    let (dx, dy) = match axis {
+      Axis::Down => (0.0, offset),
+      Axis::Across => (offset, 0.0),
     };
     button.area =
       Rect::new(x + PANEL_PAD + dx, y + PANEL_PAD + dy, BUTTON, BUTTON);

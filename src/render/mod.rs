@@ -28,8 +28,6 @@ use crate::{
 const MIN_REGION: f32 = 6.0;
 pub(super) const CARET_WIDTH: f32 = 1.5;
 
-/// What the overlay is drawn over: a frozen capture of the desktop, or the
-/// desktop itself seen live through a translucent window.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Backdrop {
   Frozen,
@@ -42,14 +40,19 @@ impl Backdrop {
   }
 }
 
-/// The selection as it can be handed over: a drag smaller than this is a stray
-/// click rather than a region worth keeping.
 #[inline(always)]
 pub fn deliverable_region(selection: Option<Rect>) -> Option<Rect> {
   selection.filter(|sel| sel.w >= MIN_REGION && sel.h >= MIN_REGION)
 }
 
-/// One frame's worth of overlay state, borrowed from the session that owns it.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Run<'a> {
+  pub at: Point,
+  pub text: &'a str,
+  pub size: f32,
+  pub color: [u8; 3],
+}
+
 pub struct Scene<'a> {
   pub backdrop: &'a Pixmap,
   pub canvas: &'a Pixmap,
@@ -58,7 +61,7 @@ pub struct Scene<'a> {
   pub picked: Option<Rect>,
   pub kind: Backdrop,
   pub draft: Option<&'a Shape>,
-  pub typing: Option<(Point, &'a str, f32, [u8; 3])>,
+  pub typing: Option<Run<'a>>,
   pub caret: bool,
   pub palette_index: usize,
   pub chrome: &'a Chrome,
@@ -67,12 +70,6 @@ pub struct Scene<'a> {
   pub hint: Option<&'a str>,
 }
 
-/// Put the committed shapes back over `base` inside `area`, and report the box
-/// actually touched.
-///
-/// Ink laid down twice is darker than ink laid once, so a translucent marker
-/// that reaches into the box is laid again rather than left compositing over
-/// its own earlier pass. That widens the box, which widens what else is redone.
 pub fn repaint(
   canvas: &mut Pixmap,
   backdrop: &mut Pixmap,
@@ -116,18 +113,9 @@ pub fn repaint(
   region
 }
 
-/// Draw the overlay over one box of the frame.
-///
-/// The frame holds the whole picture, so a partial paint has to leave every
-/// pixel outside `damage` exactly as it was and has to lay down in full
-/// anything that reaches into it.
 pub fn paint(pm: &mut Pixmap, scene: &Scene, damage: Rect) {
   let engine = scene.text;
-  let region = scene
-    .kind
-    .picks_region()
-    .then_some(scene.selection)
-    .flatten();
+  let region = scene.selection.filter(|_| scene.kind.picks_region());
   let outline = region.map(outline_boxes).unwrap_or([Rect::ZERO; 4]);
   let handles = region.map(handle_boxes).unwrap_or([Rect::ZERO; 8]);
   let plate = region.map(|sel| badge_rect(sel, scene.bounds, engine));
@@ -204,15 +192,15 @@ pub fn paint(pm: &mut Pixmap, scene: &Scene, damage: Rect) {
     }
   }
   if area.contains_rect(typing) {
-    if let Some((at, buffer, size, color)) = scene.typing {
-      engine.draw(pm, buffer, at.x, at.y, size, color);
+    if let Some(run) = scene.typing {
+      engine.draw(pm, run.text, run.at.x, run.at.y, run.size, run.color);
       // The caret is dark for the half of the blink it is not lit for, which
       // is the same as not painting it: the text underneath stays.
       if scene.caret {
-        let caret_x = at.x + engine.width(buffer, size);
+        let x = run.at.x + engine.width(run.text, run.size);
         draw::polyline(
           pm,
-          &[Point::new(caret_x, at.y), Point::new(caret_x, at.y + size)],
+          &[Point::new(x, run.at.y), Point::new(x, run.at.y + run.size)],
           [255, 255, 255],
           CARET_WIDTH,
           255,

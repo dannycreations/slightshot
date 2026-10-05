@@ -39,6 +39,11 @@ pub fn stroke_alpha(marker: bool) -> u8 {
   }
 }
 
+#[inline(always)]
+pub fn stroke_bounds(area: Rect, width: f32) -> Rect {
+  area.inflated(width * 0.5 + 1.0)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Segment {
   pub from: Point,
@@ -50,7 +55,7 @@ pub struct Segment {
 
 impl Segment {
   pub fn bounds(&self) -> Rect {
-    Rect::spanning(self.from, self.to).inflated(self.width * 0.5 + 1.0)
+    stroke_bounds(Rect::spanning(self.from, self.to), self.width)
   }
 }
 
@@ -163,8 +168,9 @@ pub struct History {
 }
 
 impl History {
-  pub fn push(&mut self, shape: Shape) {
+  pub fn push(&mut self, shape: Shape) -> usize {
     self.applied.push(shape);
+    self.applied.len() - 1
   }
 
   pub fn undo(&mut self) -> bool {

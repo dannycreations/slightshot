@@ -162,7 +162,8 @@ pub fn dashed_rect(pm: &mut Pixmap, rect: Rect, rgb: [u8; 3]) {
   pm.stroke_path(&path, &paint(rgb, 255), dash, Transform::identity(), None);
 }
 
-fn round_rect_path(r: SkRect, radius: f32) -> Option<Path> {
+fn round_rect_path(rect: Rect, radius: f32) -> Option<Path> {
+  let r = skia_rect(rect)?;
   let rr = radius.min(r.width() * 0.5).min(r.height() * 0.5);
   let mut path = PathBuilder::new();
   path.move_to(r.x() + rr, r.y());
@@ -178,11 +179,6 @@ fn round_rect_path(r: SkRect, radius: f32) -> Option<Path> {
   path.finish()
 }
 
-#[inline]
-fn rounded_path(rect: Rect, radius: f32) -> Option<Path> {
-  round_rect_path(skia_rect(rect)?, radius)
-}
-
 pub fn rounded_fill(
   pm: &mut Pixmap,
   rect: Rect,
@@ -190,7 +186,7 @@ pub fn rounded_fill(
   rgb: [u8; 3],
   alpha: u8,
 ) {
-  let Some(path) = rounded_path(rect, radius) else {
+  let Some(path) = round_rect_path(rect, radius) else {
     return;
   };
   pm.fill_path(
@@ -210,7 +206,7 @@ pub fn rounded_stroke(
   width: f32,
   alpha: u8,
 ) {
-  let Some(path) = rounded_path(rect, radius) else {
+  let Some(path) = round_rect_path(rect, radius) else {
     return;
   };
   pm.stroke_path(

@@ -1,6 +1,6 @@
 use super::{
-  build, hotspot_at, Button, Chrome, Command, Hotspot, PANEL_PAD,
-  SCREEN_MARGIN, TOOL_GAP,
+  build, hotspot_at, Button, Chrome, Command, Hotspot, ACTION_BUTTONS,
+  FROZEN_TOOLS, PANEL_PAD, SCREEN_MARGIN, TOOL_BUTTONS, TOOL_GAP,
 };
 use crate::{
   action::Deliverable,
@@ -11,7 +11,7 @@ use crate::{
 
 #[test]
 fn hotspot_at_finds_button_under_point() {
-  let mut chrome = Chrome::new(Backdrop::Frozen);
+  let mut chrome = Chrome::new();
   chrome.actions[0].area = Rect::new(10.0, 10.0, 30.0, 30.0);
   assert_eq!(
     hotspot_at(&chrome, Point::new(20.0, 20.0)),
@@ -42,11 +42,15 @@ fn command_label_names_every_button() {
   }
 }
 
+fn placed(chrome: &Chrome) -> Vec<&Button> {
+  chrome.buttons().filter(|b| b.shown()).collect()
+}
+
 #[test]
 fn build_hides_buttons_without_selection() {
   let sel = Rect::new(10.0, 10.0, 200.0, 150.0);
   let bounds = Rect::new(0.0, 0.0, 1920.0, 1080.0);
-  let mut chrome = Chrome::new(Backdrop::Frozen);
+  let mut chrome = Chrome::new();
   build(
     &mut chrome,
     Some(sel),
@@ -56,7 +60,7 @@ fn build_hides_buttons_without_selection() {
     true,
     Backdrop::Frozen,
   );
-  assert!(chrome.tools.iter().all(|b| b.area.w > 0.0));
+  assert_eq!(placed(&chrome).len(), FROZEN_TOOLS + ACTION_BUTTONS.len());
   build(
     &mut chrome,
     None,
@@ -66,8 +70,7 @@ fn build_hides_buttons_without_selection() {
     true,
     Backdrop::Frozen,
   );
-  assert!(chrome.tools.iter().all(|b| b.area.w == 0.0));
-  assert!(chrome.actions.iter().all(|b| b.area.w == 0.0));
+  assert!(placed(&chrome).is_empty());
 }
 
 #[test]
@@ -75,7 +78,7 @@ fn build_shows_deliver_buttons_when_selection_is_ready() {
   // Tall enough for the whole column, so it can hang off the region's own
   // bottom edge rather than being clamped back onto the screen.
   let sel = Rect::new(10.0, 10.0, 200.0, 400.0);
-  let mut chrome = Chrome::new(Backdrop::Frozen);
+  let mut chrome = Chrome::new();
   build(
     &mut chrome,
     Some(sel),
@@ -85,8 +88,7 @@ fn build_shows_deliver_buttons_when_selection_is_ready() {
     true,
     Backdrop::Frozen,
   );
-  assert!(chrome.tools.iter().all(|b| b.area.w > 0.0));
-  assert!(chrome.actions.iter().all(|b| b.area.w > 0.0));
+  assert_eq!(placed(&chrome).len(), FROZEN_TOOLS + ACTION_BUTTONS.len());
   let close = chrome.actions.iter().find(|b| b.command == Command::Close);
   assert!(close.is_some_and(|b| b.enabled));
   let lowest = chrome
@@ -102,10 +104,50 @@ fn build_shows_deliver_buttons_when_selection_is_ready() {
 }
 
 #[test]
+fn only_a_live_overlay_places_the_close_button_in_its_column() {
+  let sel = Rect::new(10.0, 10.0, 200.0, 400.0);
+  let bounds = Rect::new(0.0, 0.0, 1920.0, 1080.0);
+  let mut frozen = Chrome::new();
+  build(
+    &mut frozen,
+    Some(sel),
+    bounds,
+    Tool::Pen,
+    &History::default(),
+    true,
+    Backdrop::Frozen,
+  );
+  let extra = &frozen.tools[FROZEN_TOOLS];
+  assert_eq!(
+    extra.command,
+    Command::Close,
+    "the slot is the close button"
+  );
+  assert!(
+    !extra.shown(),
+    "and a frozen overlay has to leave it unplaced, got {:?}",
+    extra.area
+  );
+
+  let mut live = Chrome::new();
+  build(
+    &mut live,
+    Some(bounds),
+    bounds,
+    Tool::Pen,
+    &History::default(),
+    true,
+    Backdrop::Live,
+  );
+  assert_eq!(placed(&live).len(), TOOL_BUTTONS.len());
+  assert!(live.tools[FROZEN_TOOLS].shown());
+}
+
+#[test]
 fn build_hides_buttons_when_not_idle() {
   let sel = Rect::new(10.0, 10.0, 200.0, 150.0);
   let bounds = Rect::new(0.0, 0.0, 1920.0, 1080.0);
-  let mut chrome = Chrome::new(Backdrop::Frozen);
+  let mut chrome = Chrome::new();
   build(
     &mut chrome,
     Some(sel),
@@ -133,7 +175,7 @@ fn a_panel_taller_than_the_screen_hangs_off_the_top_of_it() {
   // A screen too short to hold the whole column used to ask `clamp` for a
   // range with its ends the wrong way round, which panics.
   let bounds = Rect::new(0.0, 0.0, 1920.0, 200.0);
-  let mut chrome = Chrome::new(Backdrop::Frozen);
+  let mut chrome = Chrome::new();
   build(
     &mut chrome,
     Some(Rect::new(10.0, 10.0, 200.0, 150.0)),
@@ -146,6 +188,7 @@ fn a_panel_taller_than_the_screen_hangs_off_the_top_of_it() {
   let top = chrome
     .tools
     .iter()
+    .filter(|b| b.shown())
     .map(|b| b.area.y)
     .fold(f32::MAX, f32::min);
   assert_eq!(
@@ -160,7 +203,7 @@ fn build_derives_button_state_from_the_session() {
   let bounds = Rect::new(0.0, 0.0, 1920.0, 1080.0);
   let ready = Rect::new(10.0, 10.0, 200.0, 150.0);
   let mut history = History::default();
-  let mut chrome = Chrome::new(Backdrop::Frozen);
+  let mut chrome = Chrome::new();
   build(
     &mut chrome,
     Some(ready),
@@ -173,9 +216,7 @@ fn build_derives_button_state_from_the_session() {
 
   fn find(chrome: &Chrome, command: Command) -> &Button {
     chrome
-      .tools
-      .iter()
-      .chain(&chrome.actions)
+      .buttons()
       .find(|b| b.command == command)
       .expect("the chrome lists every command")
   }
@@ -228,7 +269,7 @@ fn a_live_backdrop_offers_nothing_to_deliver() {
     color: [0, 0, 0],
     size: 10.0,
   });
-  let mut chrome = Chrome::new(Backdrop::Live);
+  let mut chrome = Chrome::new();
   build(
     &mut chrome,
     Some(sel),
@@ -238,7 +279,7 @@ fn a_live_backdrop_offers_nothing_to_deliver() {
     true,
     Backdrop::Live,
   );
-  for button in chrome.tools.iter().chain(&chrome.actions) {
+  for button in chrome.buttons() {
     if matches!(button.command, Command::Deliver(_)) {
       assert!(!button.enabled, "{button:?} cannot deliver a live overlay");
     }
@@ -254,7 +295,7 @@ fn a_live_backdrop_shows_its_tools_before_anything_is_picked() {
   // moment the overlay opens rather than after a drag. Nothing was captured,
   // so the row of delivery actions stays hidden and Close ends the column.
   let bounds = Rect::new(0.0, 0.0, 1920.0, 1080.0);
-  let mut chrome = Chrome::new(Backdrop::Live);
+  let mut chrome = Chrome::new();
   build(
     &mut chrome,
     Some(bounds),

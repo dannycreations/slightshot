@@ -10,11 +10,6 @@ use crate::{
 #[path = "resize_test.rs"]
 mod resize_test;
 
-/// Where a handle drag puts a run of text, and at what size.
-///
-/// Every report of the drag is measured against the box the drag started on,
-/// so a corner pulled further keeps growing by the step the pointer took rather
-/// than chasing the box it just produced.
 pub(super) fn resize_text(
   engine: &TextEngine,
   text: &str,
@@ -55,7 +50,6 @@ pub(super) fn resize_text(
   (anchor, size)
 }
 
-/// The corner opposite the handle, which stays where it was.
 fn fixed_corner(
   origin: Rect,
   handle: Handle,

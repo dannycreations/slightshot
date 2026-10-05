@@ -3,7 +3,7 @@ use tiny_skia::Pixmap;
 use super::{
   badge_rect, build, deliverable_region, dimmed_into, ink, paint,
   region_pixels, repaint, shape_area, typed_area, Backdrop, Chrome, Hotspot,
-  Scene,
+  Run, Scene,
 };
 use crate::{
   annotate::{active_color, History, Shape, Tool},
@@ -35,7 +35,7 @@ fn busy_scene(sel: Rect, bounds: Rect) -> (Pixmap, Pixmap, Chrome) {
     pixel.copy_from_slice(&[v, v.wrapping_add(7), v.wrapping_add(31), 255]);
   }
   let backdrop = dimmed(&canvas);
-  let mut chrome = Chrome::new(Backdrop::Frozen);
+  let mut chrome = Chrome::new();
   let mut history = History::default();
   history.push(Shape::Text {
     at: Point::new(40.0, 60.0),
@@ -118,7 +118,7 @@ fn draft_is_stroked_at_absolute_coordinates() {
   let sel = Rect::new(5.0, 5.0, 30.0, 70.0);
   let selection = Some(sel);
   let history = History::default();
-  let mut chrome = Chrome::new(Backdrop::Frozen);
+  let mut chrome = Chrome::new();
   build(
     &mut chrome,
     selection,
@@ -272,7 +272,7 @@ fn damage_that_clips_the_badge_repaints_the_whole_of_it() {
   let sel = Rect::new(200.0, 200.0, 100.0, 100.0);
   let canvas = Pixmap::new(400, 400).unwrap();
   let backdrop = dimmed(&canvas);
-  let mut chrome = Chrome::new(Backdrop::Frozen);
+  let mut chrome = Chrome::new();
   build(
     &mut chrome,
     Some(sel),
@@ -441,12 +441,17 @@ fn the_text_being_written_is_drawn_in_the_colour_it_will_land_in() {
   let bounds = Rect::new(0.0, 0.0, 200.0, 120.0);
   let canvas = Pixmap::new(200, 120).unwrap();
   let backdrop = dimmed(&canvas);
-  let chrome = Chrome::new(Backdrop::Frozen);
+  let chrome = Chrome::new();
   let mut scene =
     scene_of((200, 120), &canvas, &backdrop, &chrome, &engine, None);
   // The active colour is the palette's first entry, so a preview drawn in the
   // wrong one is easy to tell from the right one.
-  scene.typing = Some((Point::new(20.0, 70.0), "Hg", 20.0, [0, 255, 0]));
+  scene.typing = Some(Run {
+    at: Point::new(20.0, 70.0),
+    text: "Hg",
+    size: 20.0,
+    color: [0, 255, 0],
+  });
 
   let mut pm = Pixmap::new(200, 120).unwrap();
   paint(&mut pm, &scene, bounds);
@@ -532,7 +537,7 @@ fn the_caret_paints_inside_the_damage_box_reserved_for_it() {
   let bounds = Rect::new(0.0, 0.0, 200.0, 120.0);
   let canvas = Pixmap::new(200, 120).unwrap();
   let backdrop = dimmed(&canvas);
-  let mut chrome = Chrome::new(Backdrop::Frozen);
+  let mut chrome = Chrome::new();
   build(
     &mut chrome,
     None,
@@ -547,7 +552,12 @@ fn the_caret_paints_inside_the_damage_box_reserved_for_it() {
   let at = Point::new(100.0, 70.0);
   let mut scene =
     scene_of((200, 120), &canvas, &backdrop, &chrome, &engine, None);
-  scene.typing = Some((at, "", 20.0, [255, 255, 255]));
+  scene.typing = Some(Run {
+    at,
+    text: "",
+    size: 20.0,
+    color: [255, 255, 255],
+  });
   scene.caret = true;
 
   let mut pm = Pixmap::new(200, 120).unwrap();

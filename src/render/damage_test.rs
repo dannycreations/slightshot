@@ -54,7 +54,7 @@ fn a_picked_box_that_moves_damages_both_places_it_was() {
   let backdrop = dimmed(&canvas);
   let bounds = Rect::new(0.0, 0.0, 600.0, 600.0);
   let sel = Rect::new(20.0, 20.0, 80.0, 80.0);
-  let mut chrome = Chrome::new(Backdrop::Frozen);
+  let mut chrome = Chrome::new();
   build(
     &mut chrome,
     Some(sel),
@@ -100,7 +100,7 @@ fn an_unchanged_state_settles_nowhere() {
   let backdrop = dimmed(&canvas);
   let bounds = Rect::new(0.0, 0.0, 400.0, 400.0);
   let sel = Rect::new(20.0, 20.0, 120.0, 120.0);
-  let mut chrome = Chrome::new(Backdrop::Frozen);
+  let mut chrome = Chrome::new();
   build(
     &mut chrome,
     Some(sel),
@@ -135,7 +135,7 @@ fn a_state_that_moves_the_selection_covers_both_regions() {
   // The panels hang off the region, so the one built for each of them has to
   // be part of the damage: the old ones have to be painted out and the new
   // ones in.
-  let mut old_chrome = Chrome::new(Backdrop::Frozen);
+  let mut old_chrome = Chrome::new();
   build(
     &mut old_chrome,
     Some(from),
@@ -145,7 +145,7 @@ fn a_state_that_moves_the_selection_covers_both_regions() {
     true,
     Backdrop::Frozen,
   );
-  let mut new_chrome = Chrome::new(Backdrop::Frozen);
+  let mut new_chrome = Chrome::new();
   build(
     &mut new_chrome,
     Some(to),
@@ -195,7 +195,7 @@ fn an_unlaid_out_panel_damages_nothing() {
   let Ok(engine) = TextEngine::load() else {
     return;
   };
-  let chrome = Chrome::new(Backdrop::Live);
+  let chrome = Chrome::new();
   let area = panels_area(
     &chrome,
     None,
@@ -218,7 +218,7 @@ fn a_hover_only_change_covers_the_buttons_and_the_tooltip() {
   let backdrop = dimmed(&canvas);
   let bounds = Rect::new(0.0, 0.0, 600.0, 600.0);
   let sel = Rect::new(200.0, 200.0, 120.0, 120.0);
-  let mut chrome = Chrome::new(Backdrop::Frozen);
+  let mut chrome = Chrome::new();
   build(
     &mut chrome,
     Some(sel),

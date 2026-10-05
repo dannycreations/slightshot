@@ -138,11 +138,7 @@ impl Bitmap {
     (self.width as usize) * (self.height as usize) * 4
   }
 
-  pub fn capture_into(
-    &mut self,
-    desktop: &Desktop,
-    dst: &mut [u8],
-  ) -> Result<()> {
+  pub fn capture_into(&self, desktop: &Desktop, dst: &mut [u8]) -> Result<()> {
     let Desktop { origin, size } = *desktop;
     debug_assert!(self.fits(size), "the section must fit this desktop");
     // SAFETY: both handles belong to `self`, which outlives the blit, and the

@@ -37,8 +37,6 @@ use crate::{
 #[path = "session_test.rs"]
 mod session_test;
 
-/// Everything one open overlay owns, from the window it covers the desktop
-/// with to the single drag or run of text currently under way.
 pub(super) struct Session {
   pub(super) window: Arc<Window>,
   pub(super) backdrop_kind: Backdrop,
@@ -49,6 +47,7 @@ pub(super) struct Session {
   pub(super) selection: Option<Rect>,
   pub(super) picked: Option<usize>,
   pub(super) mode: Mode,
+  pub(super) lifted: Option<Shape>,
   pub(super) tool: Tool,
   pub(super) palette_index: usize,
   pub(super) history: History,
@@ -66,8 +65,6 @@ pub(super) struct Session {
   pub(super) shown: Option<Shown>,
 }
 
-/// What a session opens with: a capture has to be dragged out, a live overlay
-/// already covers the whole screen with the pen in hand.
 fn opening(bounds: Rect, backdrop: Backdrop) -> (Option<Rect>, Tool) {
   match backdrop {
     Backdrop::Frozen => (None, Tool::Select),
@@ -147,6 +144,7 @@ impl Session {
       selection,
       picked: None,
       mode: Mode::Idle,
+      lifted: None,
       tool,
       palette_index: 0,
       history: History::default(),
@@ -155,7 +153,7 @@ impl Session {
       press: None,
       raw_path: Vec::new(),
       hover: None,
-      chrome: Chrome::new(backdrop),
+      chrome: Chrome::new(),
       modifiers: ModifiersState::default(),
       sizes: TOOLS.map(Tool::default_size),
       hint: None,
@@ -220,7 +218,7 @@ impl Session {
       self.mode.shows_chrome(),
       self.backdrop_kind,
     );
-    let draft = self.mode.draft();
+    let draft = self.mode.draft(self.lifted.as_ref());
     let typing = self.mode.typing();
     // The caret is the session's own clock, so whether it is painted is the
     // mode's answer and not something the picture can be asked for.
@@ -285,8 +283,6 @@ impl Session {
     self.window.request_redraw();
   }
 
-  /// The capture as it stood before anything was inked, taken once and kept so
-  /// that every rebuild starts from the same ground.
   pub(super) fn snapshot(&mut self) {
     if self.base.is_some() {
       return;
@@ -325,21 +321,22 @@ impl Session {
     self.repainted(area);
   }
 
-  /// Take a run off the canvas and out of the history, so it can be moved or
-  /// resized as one object and then put back.
   pub(super) fn lift_text(&mut self, index: usize) -> Option<Shape> {
+    let slot = self.history.shape_mut(index)?;
     let Shape::Text {
       at,
       text,
       color,
       size,
-    } = self.history.shape(index)?
+    } = slot
     else {
       return None;
     };
-    let shape = Shape::Text {
+    // The buffer moves out of the slot whole rather than being copied and
+    // then cleared, which is the same empty run left behind.
+    let run = Shape::Text {
       at: *at,
-      text: text.clone(),
+      text: mem::take(text),
       color: *color,
       size: *size,
     };
@@ -347,12 +344,9 @@ impl Session {
     // descender reaches below the line and a hook can reach left of it, and
     // whatever is left of a letterform stays on the canvas for the rest of
     // the session.
-    let area = render::shape_area(Some(&shape), &self.engine);
-    if let Some(Shape::Text { text, .. }) = self.history.shape_mut(index) {
-      text.clear();
-    }
+    let area = render::shape_area(Some(&run), &self.engine);
     self.rebuild(area);
-    Some(shape)
+    Some(run)
   }
 
   pub(super) fn land_text(&mut self, index: usize, shape: Shape) {

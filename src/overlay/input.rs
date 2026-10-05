@@ -39,8 +39,6 @@ impl Session {
     self.pointer_at(p);
   }
 
-  /// The raw feed, which Windows merges whenever it cannot deliver in time. A
-  /// stroke needs it and nothing else does.
   pub(super) fn pointer_motion(&mut self, delta: (f64, f64)) {
     if !self.mode.stroking() {
       return;
@@ -115,71 +113,54 @@ impl Session {
       Mode::MoveText { .. } | Mode::ResizeText { .. } | Mode::Type(_) => {}
     }
     if let Some(step) = step {
-      match step {
-        Step::Repaint => self.window.request_redraw(),
-        Step::Segment(segment) => {
-          self.ink_segment(segment);
-          self.window.request_redraw();
-        }
+      if let Step::Segment(segment) = step {
+        self.ink_segment(segment);
       }
+      self.window.request_redraw();
     }
   }
 
-  /// Move or resize the run being dragged, which has to be lifted off the
-  /// canvas before its new place can be measured.
   fn drag_text(&mut self, p: Point) -> bool {
-    let mut mode = mem::replace(&mut self.mode, Mode::Idle);
-    let moved = match &mut mode {
-      Mode::MoveText {
-        index,
-        lifted,
-        last,
-      } => {
+    self.lift_dragged();
+    let Some(Shape::Text { at, text, size, .. }) = self.lifted.as_mut() else {
+      return false;
+    };
+    match &mut self.mode {
+      Mode::MoveText { last, .. } => {
         let delta = Point::new(p.x - last.x, p.y - last.y);
         *last = p;
-        if lifted.is_none() {
-          *lifted = self.lift_text(*index);
-        }
-        match lifted.as_mut() {
-          Some(Shape::Text { at, text, size, .. }) => {
-            // The whole box has to stay on screen, or the run cannot be
-            // pressed again to bring it back.
-            let box_ = self
-              .engine
-              .bounds(text, Point::new(at.x + delta.x, at.y + delta.y), *size)
-              .clamped_inside(self.bounds);
-            *at = Point::new(box_.x, box_.y);
-            true
-          }
-          _ => false,
-        }
+        // The whole box has to stay on screen, or the run cannot be pressed
+        // again to bring it back.
+        let box_ = self
+          .engine
+          .bounds(text, Point::new(at.x + delta.x, at.y + delta.y), *size)
+          .clamped_inside(self.bounds);
+        *at = Point::new(box_.x, box_.y);
+        true
       }
-      Mode::ResizeText {
-        index,
-        lifted,
-        handle,
-        origin,
-      } => {
+      Mode::ResizeText { handle, origin, .. } => {
         let target = p.clamped_inside(self.bounds);
-        if lifted.is_none() {
-          *lifted = self.lift_text(*index);
-        }
-        match lifted.as_mut() {
-          Some(Shape::Text { at, text, size, .. }) => {
-            let (next_at, next_size) =
-              resize_text(&self.engine, text, *origin, *handle, target);
-            let moved = *at != next_at || *size != next_size;
-            *at = next_at;
-            *size = next_size;
-            moved
-          }
-          _ => false,
-        }
+        let (next_at, next_size) =
+          resize_text(&self.engine, text, *origin, *handle, target);
+        let moved = *at != next_at || *size != next_size;
+        *at = next_at;
+        *size = next_size;
+        moved
       }
       _ => false,
+    }
+  }
+
+  fn lift_dragged(&mut self) {
+    if self.lifted.is_some() {
+      return;
+    }
+    let Some(index) = self.mode.text_index() else {
+      return;
     };
-    self.mode = mode;
-    moved
+    if let Some(run) = self.lift_text(index) {
+      self.lifted = Some(run);
+    }
   }
 
   fn set_selection(&mut self, sel: Rect) {
@@ -213,15 +194,10 @@ impl Session {
       self.mode = match handle {
         Some(handle) => Mode::ResizeText {
           index,
-          lifted: None,
           handle,
           origin: box_,
         },
-        None => Mode::MoveText {
-          index,
-          lifted: None,
-          last: p,
-        },
+        None => Mode::MoveText { index, last: p },
       };
       self.window.request_redraw();
       return None;
@@ -276,16 +252,11 @@ impl Session {
         }
       }
       // A run that never left the canvas is already where it belongs.
-      Mode::MoveText {
-        index,
-        lifted: Some(shape),
-        ..
+      Mode::MoveText { index, .. } | Mode::ResizeText { index, .. } => {
+        if let Some(run) = self.lifted.take() {
+          self.land_text(index, run);
+        }
       }
-      | Mode::ResizeText {
-        index,
-        lifted: Some(shape),
-        ..
-      } => self.land_text(index, shape),
       // Typing hands its buffer and anchor straight back: placing a run of
       // text is a click that opens it, so that one mode outlives the release.
       Mode::Type(typing) => self.mode = Mode::Type(typing),
@@ -378,10 +349,10 @@ impl Session {
       })
   }
 
-  /// The box of the run that is picked, which stays drawn until a press reaches
-  /// no run at all: it is an object on the canvas, not a mode.
   pub(super) fn picked_box(&self) -> Option<Rect> {
-    if let Some(Shape::Text { at, text, size, .. }) = self.mode.draft() {
+    if let Some(Shape::Text { at, text, size, .. }) =
+      self.mode.draft(self.lifted.as_ref())
+    {
       return self.text_box(*at, text, *size);
     }
     let Shape::Text { at, text, size, .. } =
@@ -513,10 +484,9 @@ impl Session {
     let Some(index) = typing.editing else {
       if label.is_complete() {
         let area = render::shape_area(Some(&label), &self.engine);
-        self.history.push(label);
         // A run that has just been written is picked straight away, so its
         // box is there to press on without reaching for the select tool.
-        self.picked = Some(self.history.shapes().len() - 1);
+        self.picked = Some(self.history.push(label));
         self.rebuild(area);
       }
       return;
@@ -588,19 +558,11 @@ fn format_size(size: f32) -> String {
   }
 }
 
-/// How much to stretch the reports by to reach the cursor. Anything past this
-/// is a report that never arrived, and stretching by it would fling the ink off
-/// the cursor.
 fn stretch(reported: f32, moved: f32) -> Option<f32> {
   let factor = moved / reported;
   (factor.is_finite() && factor.abs() <= MAX_STRETCH).then_some(factor)
 }
 
-/// Anchor a burst of reports at both cursor positions.
-///
-/// The reports know the shape of the path, not where the cursor ended up:
-/// Windows scales the position it reports for pointer speed, so a fast stroke
-/// arrives short and the ink would trail the cursor.
 fn place_burst(reports: &mut [Point], from: Point, to: Point) -> bool {
   let Some(last) = reports.last().copied() else {
     return false;
@@ -618,7 +580,6 @@ fn place_burst(reports: &mut [Point], from: Point, to: Point) -> bool {
   true
 }
 
-/// The whole of a double click: the same place, inside the window.
 fn is_double_click(elapsed: Duration, from: Point, to: Point) -> bool {
   elapsed <= DOUBLE_CLICK
     && from.distance_squared(to) <= DOUBLE_CLICK_SLOP * DOUBLE_CLICK_SLOP

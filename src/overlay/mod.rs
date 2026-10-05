@@ -23,8 +23,6 @@ use crate::{
   render::Backdrop,
 };
 
-/// How a session ends: the overlay closes either because the user closed it or
-/// because an image was handed over.
 pub(super) enum Outcome {
   Close,
   Deliver {
@@ -33,8 +31,6 @@ pub(super) enum Outcome {
   },
 }
 
-/// The process-wide winit handler. It owns at most one open overlay and knows
-/// nothing about what is on it, which is the session's business alone.
 #[derive(Default)]
 pub struct App {
   session: Option<Session>,

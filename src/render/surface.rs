@@ -104,11 +104,10 @@ pub(super) fn copy_region(
   let src_row = from_y as usize * src_stride + from_x as usize * 4;
   let dst_row = to_y as usize * dst_stride + to_x as usize * 4;
 
-  if from_x == 0
-    && to_x == 0
-    && row_bytes == src_stride
-    && row_bytes == dst_stride
-  {
+  // Whole rows in both buffers abut, so every row of the box follows the
+  // last one and the box is one contiguous run. The column offsets are
+  // already baked into `src_row` and `dst_row`.
+  if to_x == 0 && row_bytes == src_stride && row_bytes == dst_stride {
     let total = row_bytes * height as usize;
     dst[dst_row..dst_row + total]
       .copy_from_slice(&src[src_row..src_row + total]);
@@ -193,8 +192,6 @@ pub(super) fn ink(pm: &mut Pixmap, shape: &Shape, engine: &TextEngine) {
   }
 }
 
-/// Where an arrow's shaft stops so that it meets the head rather than running
-/// under it.
 fn arrow_base(from: Point, to: Point, head_size: f32) -> Point {
   let (dx, dy) = (to.x - from.x, to.y - from.y);
   let len = dx.hypot(dy);

@@ -11,12 +11,6 @@ use crate::{geom::Rect, layer::Layered, pixel::swap_words_region};
 
 pub(super) type Surface = SoftSurface<Arc<Window>, Arc<Window>>;
 
-/// Where a frame reaches the screen.
-///
-/// A capture is opaque and shows only what was snapshotted, so it goes to a
-/// solid window. A live overlay shows the desktop through itself, so it needs
-/// a layered window instead. The two are not the same output, which is why
-/// they cannot be one buffer.
 pub(super) enum Presenter {
   Solid(Surface),
   Live(Layered),
