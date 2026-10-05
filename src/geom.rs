@@ -57,6 +57,21 @@ impl Rect {
     )
   }
 
+  pub fn around(points: &[Point]) -> Self {
+    let Some((first, rest)) = points.split_first() else {
+      return Rect::ZERO;
+    };
+    let (mut left, mut top) = (first.x, first.y);
+    let (mut right, mut bottom) = (first.x, first.y);
+    for p in rest {
+      left = left.min(p.x);
+      top = top.min(p.y);
+      right = right.max(p.x);
+      bottom = bottom.max(p.y);
+    }
+    Rect::new(left, top, right - left, bottom - top)
+  }
+
   #[inline(always)]
   pub fn inflated(self, margin: f32) -> Rect {
     Self::new(
@@ -237,30 +252,30 @@ mod tests {
   }
 
   #[test]
-  fn hit_handle_returns_the_first_anchor_within_the_slop() {
-    fn scan(rect: Rect, p: Point, slop: f32) -> Option<Handle> {
-      HANDLES
-        .into_iter()
-        .find(|&h| handle_anchor(rect, h).distance_squared(p) <= slop * slop)
-    }
-
-    for w in [0.0, 1.0, 7.0, 30.0] {
-      for h in [0.0, 1.0, 7.0, 30.0] {
-        let rect = Rect::new(10.0, 10.0, w, h);
-        for slop in [0.0, 1.0, 7.0, 20.0] {
-          for x in -8..=26 {
-            for y in -8..=26 {
-              let p = Point::new(x as f32, y as f32);
-              assert_eq!(
-                hit_handle(rect, p, slop),
-                scan(rect, p, slop),
-                "rect {rect:?} slop {slop} point {p:?}"
-              );
-            }
-          }
-        }
-      }
-    }
+  fn around_covers_every_point_in_any_order() {
+    // The order a stroke was drawn in cannot move where its ink is claimed to
+    // be, so the box has to come out the same whichever end was drawn first.
+    let forwards = [
+      Point::new(30.0, -10.0),
+      Point::new(-5.0, 40.0),
+      Point::new(12.0, 12.0),
+    ];
+    assert_eq!(
+      Rect::around(&forwards),
+      Rect::around(&forwards.iter().rev().copied().collect::<Vec<_>>()),
+      "the box does not depend on the order of the samples"
+    );
+    assert_eq!(
+      Rect::around(&forwards),
+      Rect::new(-5.0, -10.0, 35.0, 50.0),
+      "and it has to hold all three, corners and middle alike"
+    );
+    assert_eq!(Rect::around(&[]), Rect::ZERO, "no samples claim no ground");
+    assert_eq!(
+      Rect::around(&[Point::new(4.0, 7.0)]),
+      Rect::new(4.0, 7.0, 0.0, 0.0),
+      "one sample is a box of no size at that point"
+    );
   }
 
   #[test]

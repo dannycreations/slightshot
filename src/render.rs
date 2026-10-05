@@ -243,9 +243,11 @@ fn layout_panel(buttons: &mut [Button], sel: Rect, bounds: Rect, panel: Panel) {
       bounds.bottom() - SCREEN_MARGIN,
     )
   } else {
-    (sel.bottom() - height).clamp(
+    clamp_span(
+      sel.bottom() - height,
+      height,
       bounds.y + SCREEN_MARGIN,
-      (bounds.bottom() - height - SCREEN_MARGIN).max(bounds.y),
+      bounds.bottom() - SCREEN_MARGIN,
     )
   };
   lay_out_buttons(buttons, (x, y), Panel::Column { live });
@@ -318,31 +320,37 @@ impl Shown {
   ) -> Rect {
     let mut area = Rect::ZERO;
     if self.selection != next.selection {
-      area = area.union(region_area(self.selection, bounds, engine));
-      area = area.union(region_area(next.selection, bounds, engine));
+      area = area
+        .union(region_area(self.selection, bounds, engine))
+        .union(region_area(next.selection, bounds, engine));
     }
     if self.picked != next.picked {
-      area = area.union(picked_area(self.picked));
-      area = area.union(picked_area(next.picked));
+      area = area
+        .union(picked_area(self.picked))
+        .union(picked_area(next.picked));
     }
     // A new colour repaints the panels as well, because the swatch on the
     // colour button is the one thing on them that takes it.
-    let panels_moved = self.chrome != next.chrome
+    let recolored = self.palette != next.palette;
+    if self.chrome != next.chrome
       || self.hotspot != next.hotspot
       || self.hint != next.hint
-      || self.palette != next.palette;
-    if panels_moved {
-      area = area.union(self.panels_area(bounds, engine));
-      area = area.union(next.panels_area(bounds, engine));
+      || recolored
+    {
+      area = area
+        .union(self.panels_area(bounds, engine))
+        .union(next.panels_area(bounds, engine));
     }
     if self.draft != next.draft {
-      area = area.union(shape_area(self.draft.as_ref(), engine));
-      area = area.union(shape_area(next.draft.as_ref(), engine));
+      area = area
+        .union(shape_area(self.draft.as_ref(), engine))
+        .union(shape_area(next.draft.as_ref(), engine));
     }
     // The text being typed is the other thing that takes the active colour.
-    if self.typing != next.typing || self.palette != next.palette {
-      area = area.union(typed_area(self.typed(), engine));
-      area = area.union(typed_area(next.typed(), engine));
+    if self.typing != next.typing || recolored {
+      area = area
+        .union(typed_area(self.typed(), engine))
+        .union(typed_area(next.typed(), engine));
     }
     area
   }
@@ -421,21 +429,10 @@ fn panels_area(
 
 pub fn shape_area(shape: Option<&Shape>, engine: &TextEngine) -> Rect {
   match shape {
+    // Half the width past each end for the round caps, plus the
+    // antialiased pixel outside them.
     Some(Shape::Stroke { points, width, .. }) => {
-      let (first, last) = (
-        points.first().copied().unwrap_or_default(),
-        points.last().copied().unwrap_or_default(),
-      );
-      let corners =
-        points
-          .iter()
-          .fold(Rect::spanning(first, last), |area, point| {
-            Rect::spanning(
-              Point::new(area.x.min(point.x), area.y.min(point.y)),
-              Point::new(area.right().max(point.x), area.bottom().max(point.y)),
-            )
-          });
-      corners.inflated(width * 0.5 + 1.0)
+      Rect::around(points).inflated(width * 0.5 + 1.0)
     }
     Some(Shape::Line {
       from, to, width, ..
@@ -534,33 +531,42 @@ pub fn paint(pm: &mut Pixmap, scene: &Scene, damage: Rect) {
     .flatten();
   let outline = region.map(outline_boxes).unwrap_or([Rect::ZERO; 4]);
   let handles = region.map(handle_boxes).unwrap_or([Rect::ZERO; 8]);
-  let badge = [region
-    .map(|sel| badge_rect(sel, scene.bounds, engine).inflated(EDGE))
-    .unwrap_or(Rect::ZERO)];
-  let draft = [shape_area(scene.draft, engine)];
-  let typing = [typed_area(scene.typing, engine)];
-  let picked = [picked_area(scene.picked)];
-  let panels = [panels_area(
+  let plate = region.map(|sel| badge_rect(sel, scene.bounds, engine));
+  let badge = plate.map_or(Rect::ZERO, |plate| plate.inflated(EDGE));
+  let draft = shape_area(scene.draft, engine);
+  let typing = typed_area(scene.typing, engine);
+  let picked = picked_area(scene.picked);
+  let panels = panels_area(
     scene.chrome,
     scene.hotspot,
     scene.hint,
     scene.bounds,
     engine,
-  )];
+  );
 
+  // Damage grows to whole pieces: each group is laid down in a single go,
+  // so a box that has reached any part of one has to carry all of it. Carrying
+  // one group can reach the next, so this settles rather than settling once:
+  // anything the blit below clips is then either wholly outside the area or
+  // wholly inside it, which is what the redraw guards below ask for.
   let mut area = damage;
-  for piece in [
-    &outline[..],
-    &handles[..],
-    &badge[..],
-    &draft[..],
-    &typing[..],
-    &picked[..],
-    &panels[..],
-  ] {
-    if touches(piece, area) {
-      area = area.union(bounding(piece));
+  loop {
+    let mut grown = area;
+    if touches(&outline, area) {
+      grown = grown.union(bounding(&outline));
     }
+    if touches(&handles, area) {
+      grown = grown.union(bounding(&handles));
+    }
+    for piece in [badge, draft, typing, picked, panels] {
+      if grown.overlaps(piece) {
+        grown = grown.union(piece);
+      }
+    }
+    if grown == area {
+      break;
+    }
+    area = grown;
   }
 
   let (x0, y0, width, height) = region_pixels(area, pm.width(), pm.height());
@@ -587,16 +593,18 @@ pub fn paint(pm: &mut Pixmap, scene: &Scene, damage: Rect) {
     if inside(&handles, area) {
       draw_handles(pm, sel);
     }
-    if inside(&badge, area) {
-      draw_badge(pm, sel, scene.bounds, engine);
+  }
+  if let (Some(sel), Some(plate)) = (region, plate) {
+    if area.contains_rect(badge) {
+      draw_badge(pm, plate, &badge_label(sel), engine);
     }
   }
-  if inside(&draft, area) {
+  if area.contains_rect(draft) {
     if let Some(shape) = scene.draft {
       ink(pm, shape, engine);
     }
   }
-  if inside(&typing, area) {
+  if area.contains_rect(typing) {
     if let Some((at, buffer, size, color)) = scene.typing {
       engine.draw(pm, buffer, at.x, at.y, size, color);
       // The caret is dark for the half of the blink it is not lit for, which
@@ -613,13 +621,13 @@ pub fn paint(pm: &mut Pixmap, scene: &Scene, damage: Rect) {
       }
     }
   }
-  if inside(&picked, area) {
+  if area.contains_rect(picked) {
     if let Some(box_) = scene.picked {
       draw::dashed_rect(pm, box_, [255, 255, 255]);
       draw_handles(pm, box_);
     }
   }
-  if inside(&panels, area) {
+  if area.contains_rect(panels) {
     draw_panels(pm, scene);
   }
 }
@@ -837,13 +845,11 @@ fn badge_rect(sel: Rect, bounds: Rect, engine: &TextEngine) -> Rect {
   Rect::new(bx, by, box_w, BADGE_H)
 }
 
-fn draw_badge(pm: &mut Pixmap, sel: Rect, bounds: Rect, engine: &TextEngine) {
-  let label = badge_label(sel);
-  let plate = badge_rect(sel, bounds, engine);
+fn draw_badge(pm: &mut Pixmap, plate: Rect, label: &str, engine: &TextEngine) {
   draw::rounded_fill(pm, plate, 4.0, [10, 10, 10], 210);
   engine.draw(
     pm,
-    &label,
+    label,
     plate.x + BADGE_PAD,
     plate.y + 3.5,
     BADGE_TEXT,
@@ -1159,6 +1165,33 @@ mod tests {
     );
     assert!(chrome.tools.iter().all(|b| b.area.w == 0.0));
     assert!(chrome.actions.iter().all(|b| b.area.w == 0.0));
+  }
+
+  #[test]
+  fn a_panel_taller_than_the_screen_hangs_off_the_top_of_it() {
+    // A screen too short to hold the whole column used to ask `clamp` for a
+    // range with its ends the wrong way round, which panics.
+    let bounds = Rect::new(0.0, 0.0, 1920.0, 200.0);
+    let mut chrome = Chrome::new(Backdrop::Frozen);
+    build(
+      &mut chrome,
+      Some(Rect::new(10.0, 10.0, 200.0, 150.0)),
+      bounds,
+      Tool::Pen,
+      &History::default(),
+      true,
+      Backdrop::Frozen,
+    );
+    let top = chrome
+      .tools
+      .iter()
+      .map(|b| b.area.y)
+      .fold(f32::MAX, f32::min);
+    assert_eq!(
+      top,
+      bounds.y + SCREEN_MARGIN + PANEL_PAD,
+      "the column sits against the top edge, which is all there is room for"
+    );
   }
 
   #[test]
@@ -1630,6 +1663,52 @@ mod tests {
       first_difference(frame.data(), before.data()),
       None,
       "repainting the same scene over a box of it must change nothing"
+    );
+  }
+
+  #[test]
+  fn damage_that_clips_the_badge_repaints_the_whole_of_it() {
+    // The badge is laid down in one piece, so a box that clips a corner of it
+    // has to bring the whole thing back rather than leave the rest of it
+    // standing on screen for the rest of the session. The chrome is left
+    // unlaid out so the badge is the only piece the damage can reach: a panel
+    // spans the middle of the screen and would carry it either way.
+    let Ok(engine) = TextEngine::load() else {
+      return;
+    };
+    let bounds = Rect::new(0.0, 0.0, 400.0, 400.0);
+    let sel = Rect::new(200.0, 200.0, 100.0, 100.0);
+    let canvas = Pixmap::new(400, 400).unwrap();
+    let backdrop = dimmed(&canvas);
+    let mut chrome = Chrome::new(Backdrop::Frozen);
+    build(
+      &mut chrome,
+      Some(sel),
+      bounds,
+      Tool::Pen,
+      &History::default(),
+      false,
+      Backdrop::Frozen,
+    );
+    let scene =
+      scene_of((400, 400), &canvas, &backdrop, &chrome, &engine, Some(sel));
+    let badge = badge_rect(sel, bounds, &engine);
+
+    let mut whole = Pixmap::new(400, 400).unwrap();
+    paint(&mut whole, &scene, bounds);
+    let mut clipped = Pixmap::new(400, 400).unwrap();
+    paint(&mut clipped, &scene, bounds);
+    // The bottom right corner of the badge, clear of the region's own frame.
+    paint(
+      &mut clipped,
+      &scene,
+      Rect::new(badge.right() - 8.0, badge.bottom() - 4.0, 8.0, 4.0),
+    );
+
+    assert_eq!(
+      first_difference(clipped.data(), whole.data()),
+      None,
+      "the badge has to come back whole, got {badge:?}"
     );
   }
 

@@ -208,6 +208,13 @@ impl Buffer {
     Ok(self.0.as_mut().expect("just ensured"))
   }
 
+  fn get(&self) -> &Pixmap {
+    self
+      .0
+      .as_ref()
+      .expect("a session sizes its buffers before it opens")
+  }
+
   fn at(&mut self) -> &mut Pixmap {
     self
       .0
@@ -738,8 +745,9 @@ impl Session {
         let dragged = resized(*rect, *handle, target);
         self.set_selection(dragged);
       }
-      Mode::MoveText { .. } | Mode::ResizeText { .. } => {}
-      Mode::Type(_) => {}
+      // A run being dragged was dispatched above, and typing follows no
+      // path of its own.
+      Mode::MoveText { .. } | Mode::ResizeText { .. } | Mode::Type(_) => {}
     }
     if let Some(step) = step {
       match step {
@@ -1037,12 +1045,7 @@ impl Session {
       return None;
     }
     let sel = render::deliverable_region(self.selection)?;
-    let canvas = self
-      .buffers
-      .canvas
-      .0
-      .as_ref()
-      .expect("a session has a canvas");
+    let canvas = self.buffers.canvas.get();
     Some(Outcome::Deliver {
       deliverable,
       shot: render::flatten(canvas, sel),
@@ -1230,11 +1233,7 @@ impl Session {
       self.picked = None;
       return;
     }
-    let area = render::shape_area(Some(&label), &self.engine);
-    if let Some(slot) = self.history.shape_mut(index) {
-      *slot = label;
-    }
-    self.rebuild(area);
+    self.land_text(index, label);
   }
 
   fn edit_picked(&mut self) {

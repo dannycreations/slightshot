@@ -82,7 +82,6 @@ impl TextEngine {
         let mut atlas = self.atlas.borrow_mut();
         let offset = atlas.len() as u32;
         atlas.extend_from_slice(&coverage);
-        drop(atlas);
         let info = GlyphInfo {
           metrics,
           offset,
@@ -142,9 +141,6 @@ impl TextEngine {
   }
 
   pub fn inked(&self, text: &str, at: Point, size: f32) -> Rect {
-    if text.is_empty() {
-      return Rect::ZERO;
-    }
     let baseline = at.y + size * ASCENT_RATIO;
     let mut pen = at.x;
     let mut area = Rect::ZERO;
@@ -159,9 +155,9 @@ impl TextEngine {
       ));
       pen += metrics.advance_width;
     }
-    // A run of nothing but spaces inks nothing, and a box around nothing is
-    // not a box: inflating the empty rect would leave one sitting at the
-    // origin for a click to land on.
+    // A run that inks nothing, be it no characters at all or nothing but
+    // spaces, reports no box: inflating the empty rect would leave one
+    // sitting at the origin for a click to land on.
     if area.is_empty() {
       return Rect::ZERO;
     }
